@@ -1,13 +1,20 @@
 import sqlite3
 import json
 import hashlib
+import os
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from models import LogEventRequest
 
 class DatabaseManager:
-    def __init__(self, db_path: str = "data/undspecified_queries.db"):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            # Get the directory where this file is located
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            db_path = os.path.join(current_dir, "data", "undspecified_queries.db")
         self.db_path = db_path
+        # Ensure the data directory exists
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.init_database()
     
     def init_database(self):

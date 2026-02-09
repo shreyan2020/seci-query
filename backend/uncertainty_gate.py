@@ -57,6 +57,12 @@ class UncertaintyGate:
         "data_type": ["RNA-seq", "microarray", "proteomics", "ChIP-seq", "ATAC-seq"],
     }
     
+    # Vague reference indicators (pronouns without clear antecedents)
+    VAGUE_REFERENCES = ["it", "this", "that", "these", "those", "them"]
+    
+    # Very short queries are inherently uncertain
+    MIN_QUERY_LENGTH = 10
+    
     # Ambiguity indicators
     AMBIGUITY_PATTERNS = [
         "best", "good", "optimal", "better", "recommended",
@@ -151,6 +157,20 @@ class UncertaintyGate:
         reasons = []
         missing_vars = []
         score = 0.0
+        
+        # Check for very short queries (inherently uncertain)
+        if len(query.strip()) < self.MIN_QUERY_LENGTH:
+            reasons.append(f"Query too short ({len(query)} chars) - insufficient context")
+            missing_vars.append("query_clarity")
+            score += 0.4
+        
+        # Check for vague pronoun references
+        words = query_lower.split()
+        vague_count = sum(1 for word in words if word.strip(".,!?;:") in self.VAGUE_REFERENCES)
+        if vague_count > 0:
+            reasons.append(f"Vague pronoun references detected: {vague_count}")
+            missing_vars.append("reference_clarity")
+            score += 0.3 * vague_count
         
         for param, patterns in self.UNDERSPECIFICATION_PATTERNS.items():
             # Check if parameter is mentioned in query but not specified
@@ -271,6 +291,19 @@ class UncertaintyGate:
         reasons = []
         missing_vars = []
         score = 0.0
+        
+        # Check for very generic action words without specifics
+        generic_actions = ["analyze", "process", "do", "handle", "work with", "deal with"]
+        has_generic_action = any(action in query_lower for action in generic_actions)
+        
+        # If generic action + vague reference = high uncertainty
+        if has_generic_action:
+            words = query_lower.split()
+            vague_count = sum(1 for word in words if word.strip(".,!?;:") in self.VAGUE_REFERENCES)
+            if vague_count > 0:
+                reasons.append(f"Generic action '{query_lower}' with vague reference")
+                score += 0.35
+                missing_vars.append("action_target")
         
         # Check for open-ended questions
         open_ended = ["suggest", "recommend", "ideas", "options", "alternatives"]

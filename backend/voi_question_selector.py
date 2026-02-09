@@ -320,7 +320,7 @@ class InformationAwareController:
                 "critical_missing": uncertainty.critical_missing,
                 "recommended_missing": uncertainty.recommended_missing,
                 "template_id": template_id,
-                "template_name": template_info["name"],
+                "template_name": template_info.get("name", "Unknown") if template_info else "Unknown",
                 "critical_questions": [
                     {
                         "question": q.question,
@@ -341,7 +341,8 @@ class InformationAwareController:
             
             # Try to instantiate template with inferred values
             slot_values = {}
-            for slot in template_info["slots"]:
+            slots = template_info.get("slots", []) if template_info else []
+            for slot in slots:
                 # Try to infer from context
                 inferred = self._try_infer_slot(slot, context)
                 if inferred:
@@ -359,16 +360,21 @@ class InformationAwareController:
             else:
                 execution_plan = []
             
+            # Safely get template name
+            template_name = "Unknown"
+            if template_info and isinstance(template_info, dict):
+                template_name = template_info.get("name", "Unknown") or "Unknown"
+            
             return {
                 "strategy": strategy,
                 "uncertainty_score": uncertainty.total_score,
                 "confidence_level": uncertainty.confidence_level,
                 "need_disambiguation": False,
                 "template_id": template_id,
-                "template_name": template_info["name"],
+                "template_name": template_name,
                 "inferred_slots": slot_values,
                 "execution_plan": execution_plan,
-                "notes": uncertainty.get_decision_explanation(uncertainty)
+                "notes": f"Uncertainty score: {uncertainty.total_score:.2f}. Confidence: {uncertainty.confidence_level}"
             }
     
     def _try_infer_slot(self, slot: str, context: Optional[str]) -> Optional[str]:
@@ -376,9 +382,84 @@ class InformationAwareController:
         if not context:
             return None
         
-        # Use same logic as VOI selector
-        selector = VOIDrivenQuestionSelector(None)  # No TCG needed for this
-        return selector._try_infer_from_context(slot, context)
+        # Use static inference logic without creating object
+        return self._static_infer_from_context(slot, context)
+    
+    def _static_infer_from_context(self, slot: str, context: str) -> Optional[str]:
+        """Static method for slot inference without needing full selector initialization"""
+        context_lower = context.lower()
+        
+        inference_rules = {
+            "species": {
+                "keywords": ["human", "mouse", "rat", "fly", "worm", "yeast", "zebrafish"],
+                "extractors": [
+                    lambda c: "human" if "human" in c else None,
+                    lambda c: "mouse" if "mouse" in c or "mus musculus" in c else None,
+                ]
+            },
+            "cell_line": {
+                "keywords": ["hela", "hek293", "mcf7", "a549", "k562"],
+                "extractors": [
+                    lambda c: "HeLa" if "hela" in c else None,
+                    lambda c: "HEK293" if "hek293" in c or "hek-293" in c else None,
+                ]
+            },
+            "tissue": {
+                "keywords": ["liver", "brain", "heart", "lung", "kidney", "muscle"],
+                "extractors": [
+                    lambda c: "liver" if "liver" in c else None,
+                    lambda c: "brain" if "brain" in c or "cerebral" in c else None,
+                ]
+            },
+            "gene": {
+                "keywords": ["gene", "promoter", "enhancer", "transcription factor"],
+                "extractors": [
+                    lambda c: self._extract_gene_symbol(c),
+                ]
+            },
+            "condition": {
+                "keywords": ["treatment", "control", "disease", "wild-type", "ko", "knockout"],
+                "extractors": [
+                    lambda c: "treatment" if any(x in c for x in ["treated", "treatment"]) else None,
+                    lambda c: "control" if any(x in c for x in ["control", "untreated", "wild-type"]) else None,
+                ]
+            }
+        }
+        
+        if slot not in inference_rules:
+            return None
+        
+        rules = inference_rules[slot]
+        
+        # Try extractors first
+        for extractor in rules.get("extractors", []):
+            try:
+                result = extractor(context_lower)
+                if result:
+                    return result
+            except:
+                continue
+        
+        # Try keyword matching
+        for keyword in rules.get("keywords", []):
+            if keyword in context_lower:
+                return keyword
+        
+        return None
+    
+    def _extract_gene_symbol(self, context: str) -> Optional[str]:
+        """Extract gene symbol from context using simple heuristics"""
+        import re
+        # Match common gene symbol patterns
+        patterns = [
+            r'\b([A-Z]{2,6}[0-9]{0,2})\b',  # Standard gene symbols like BRCA1, TP53
+            r'gene\s+(\w+)',  # "gene XXX"
+        ]
+        for pattern in patterns:
+            matches = re.findall(pattern, context, re.IGNORECASE)
+            if matches:
+                return matches[0].upper()
+        return None
 
 
 # Global instance

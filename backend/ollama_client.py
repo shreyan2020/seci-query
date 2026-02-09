@@ -92,7 +92,7 @@ class OllamaClient:
         """Generate optimized, fast prompts for objective generation."""
         context_part = f"Context: {context}\n" if context else ""
         
-        return f"""You are an expert at interpreting user queries. Generate {k} distinct objectives FAST.
+        return f"""You are an expert at interpreting user queries. Generate {k} distinct objectives.
 
 {context_part}Query: "{query}"
 Type: {query_type.value}
