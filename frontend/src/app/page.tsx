@@ -1,16 +1,29 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
-// API types - matching backend models
-interface Objective {
+// Types matching backend v2.0
+interface ProgressiveDisclosure {
+  tldr: string;
+  key_tradeoffs: string[];
+  next_actions: string[];
+}
+
+interface EnhancedObjective {
   id: string;
   title: string;
   subtitle: string;
   definition: string;
   signals: string[];
   facet_questions: string[];
-  exemplar_answer: string;
+  exemplar_answer?: string;
+  when_this_objective_is_wrong?: string;
+  minimum_info_needed?: string[];
+  expected_output_format?: string;
+  confidence: string;
+  is_speculative: boolean;
+  rationale?: string;
+  summary: ProgressiveDisclosure;
 }
 
 interface EvidenceItem {
@@ -19,522 +32,718 @@ interface EvidenceItem {
   title: string;
   snippet: string;
   source_ref: string;
+  source_quality?: string;
   score: number;
 }
 
-interface ObjectivesResponse {
-  objectives: Objective[];
-  global_questions: string[];
+interface ContextRequirement {
+  type: string;
+  description: string;
+  importance: 'required' | 'recommended' | 'optional';
+  why: string;
+  example: string;
 }
 
-interface AugmentResponse {
-  evidence_items: EvidenceItem[];
-  augmented_answer?: string;
+interface QueryAnalysis {
+  query_type: {
+    name: string;
+    description: string;
+    characteristics: string[];
+    complexity: string;
+    estimated_time_seconds: number;
+  };
+  missing_context: ContextRequirement[];
+  suggested_objectives_count: number;
+  objective_categories: string[];
+  user_expertise_inferred: string;
 }
 
-interface FinalizeResponse {
-  final_answer: string;
-  assumptions: string[];
-  next_questions: string[];
+interface ExplorationNode {
+  id: string;
+  parent_id: string | null;
+  query: string;
+  context: string;
+  objectives: EnhancedObjective[];
+  selected_objective?: EnhancedObjective;
+  answers: Record<string, string>;
+  evidence: EvidenceItem[];
+  final_answer?: string;
+  timestamp: number;
+  depth: number;
+  dynamic_type?: string;
 }
 
-// API client
+// API base URL
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-async function generateObjectives(query: string, context?: string, k: number = 5): Promise<ObjectivesResponse> {
-  const response = await fetch(`${API_BASE}/objectives`, {
+// Session management
+const SESSION_ID_KEY = 'seci_session_id';
+const USER_ID_KEY = 'seci_user_id';
+
+// Initialize session
+async function initializeSession(): Promise<{ session_id: string; user_id: string }> {
+  const existingSession = localStorage.getItem(SESSION_ID_KEY);
+  const existingUser = localStorage.getItem(USER_ID_KEY);
+  
+  if (existingSession && existingUser) {
+    return { session_id: existingSession, user_id: existingUser };
+  }
+  
+  const response = await fetch(`${API_BASE}/init`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: 'web_app' })
+  });
+  
+  if (!response.ok) throw new Error('Failed to initialize');
+  
+  const data = await response.json();
+  localStorage.setItem(SESSION_ID_KEY, data.session_id);
+  localStorage.setItem(USER_ID_KEY, data.user_id);
+  
+  return { session_id: data.session_id, user_id: data.user_id };
+}
+
+// API functions
+async function analyzeQuery(
+  query: string, 
+  context: string,
+  session: { session_id: string; user_id: string }
+) {
+  const response = await fetch(`${API_BASE}/analyze`, {
+    method: 'POST',
+    headers: { 
+      'Content-Type': 'application/json',
+      'X-User-Id': session.user_id,
+      'X-Session-Id': session.session_id
+    },
+    body: JSON.stringify({ query, context })
+  });
+  if (!response.ok) throw new Error('Failed to analyze');
+  return response.json();
+}
+
+async function generateDynamicObjectives(
+  query: string,
+  context: string,
+  session: { session_id: string; user_id: string },
+  k: number = 5
+) {
+  const response = await fetch(`${API_BASE}/objectives/dynamic`, {
+    method: 'POST',
+    headers: { 
+      'Content-Type': 'application/json',
+      'X-User-Id': session.user_id,
+      'X-Session-Id': session.session_id
+    },
     body: JSON.stringify({ query, context, k })
   });
   if (!response.ok) throw new Error('Failed to generate objectives');
   return response.json();
 }
 
-async function augmentWithContext(query: string, objectiveId: string, objectiveDefinition: string, contextBlob: string): Promise<AugmentResponse> {
+async function augmentWithContext(
+  query: string, 
+  objectiveId: string, 
+  definition: string, 
+  context: string,
+  session: { session_id: string; user_id: string }
+) {
   const response = await fetch(`${API_BASE}/augment`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, objective_id: objectiveId, objective_definition: objectiveDefinition, context_blob: contextBlob })
+    headers: { 
+      'Content-Type': 'application/json',
+      'X-User-Id': session.user_id,
+      'X-Session-Id': session.session_id
+    },
+    body: JSON.stringify({ 
+      query, 
+      objective_id: objectiveId, 
+      objective_definition: definition, 
+      context_blob: context 
+    })
   });
-  if (!response.ok) throw new Error('Failed to augment with context');
+  if (!response.ok) throw new Error('Failed to augment');
   return response.json();
 }
 
-async function finalizeAnswer(query: string, objective: Objective, answers: Record<string, string>, contextBlob?: string, evidenceItems?: EvidenceItem[]): Promise<FinalizeResponse> {
+async function finalizeAnswer(
+  query: string, 
+  objective: EnhancedObjective, 
+  answers: Record<string, string>, 
+  session: { session_id: string; user_id: string }
+) {
   const response = await fetch(`${API_BASE}/finalize`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, objective, answers, context_blob: contextBlob, evidence_items: evidenceItems })
+    headers: { 
+      'Content-Type': 'application/json',
+      'X-User-Id': session.user_id,
+      'X-Session-Id': session.session_id
+    },
+    body: JSON.stringify({ query, objective, answers })
   });
-  if (!response.ok) throw new Error('Failed to finalize answer');
+  if (!response.ok) throw new Error('Failed to finalize');
   return response.json();
 }
 
-// Original UI components and styling patterns
-function classNames(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(' ');
+// UI Components
+function cn(...classes: (string | false | null | undefined)[]) {
+  return classes.filter(Boolean).join(' ');
 }
 
-function Pill({ children }: { children: React.ReactNode }) {
+function ConfidenceBadge({ level }: { level: string }) {
+  const colors: Record<string, string> = {
+    high: 'bg-green-100 text-green-800 border-green-200',
+    medium: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+    low: 'bg-orange-100 text-orange-800 border-orange-200',
+    uncertain: 'bg-red-100 text-red-800 border-red-200'
+  };
   return (
-    <span className="inline-flex items-center rounded-full border border-neutral-200 bg-neutral-50 px-2 py-0.5 text-xs text-neutral-700">
-      {children}
+    <span className={cn('px-2 py-0.5 text-xs font-medium border rounded', colors[level] || colors.medium)}>
+      {level}
     </span>
   );
 }
 
-function SectionTitle({ title, subtitle }: { title: string; subtitle?: string }) {
+function SourceBadge({ quality }: { quality?: string }) {
+  const colors: Record<string, string> = {
+    primary: 'bg-blue-100 text-blue-800',
+    review: 'bg-purple-100 text-purple-800',
+    secondary: 'bg-gray-100 text-gray-800',
+    anecdotal: 'bg-orange-100 text-orange-800'
+  };
   return (
-    <div className="mb-3">
-      <div className="text-sm font-semibold text-neutral-900">{title}</div>
-      {subtitle ? <div className="text-xs text-neutral-600">{subtitle}</div> : null}
-    </div>
+    <span className={cn('px-2 py-0.5 text-xs rounded', colors[quality || 'secondary'])}>
+      {quality || 'unknown'}
+    </span>
   );
 }
 
-function LoadingSpinner() {
+function RequirementBadge({ importance }: { importance: string }) {
+  const colors: Record<string, string> = {
+    required: 'bg-red-100 text-red-800',
+    recommended: 'bg-yellow-100 text-yellow-800',
+    optional: 'bg-gray-100 text-gray-600'
+  };
   return (
-    <div className="flex items-center justify-center py-8">
-      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-neutral-900"></div>
-    </div>
+    <span className={cn('text-xs px-2 py-0.5 rounded font-medium', colors[importance] || colors.optional)}>
+      {importance}
+    </span>
   );
 }
 
-export default function SECIQueryExplorer() {
-  // State
-  const [query, setQuery] = useState('best breakfast options');
-  const [contextBlob, setContextBlob] = useState('');
-  const [objectives, setObjectives] = useState<Objective[]>([]);
-  const [globalQuestions, setGlobalQuestions] = useState<string[]>([]);
-  const [selectedObjective, setSelectedObjective] = useState<Objective | null>(null);
-  const [facetAnswers, setFacetAnswers] = useState<Record<string, string>>({});
-  const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>([]);
-  const [augmentedAnswer, setAugmentedAnswer] = useState<string>('');
-  const [finalAnswer, setFinalAnswer] = useState<FinalizeResponse | null>(null);
+export default function DynamicQueryExplorer() {
+  // Session state
+  const [session, setSession] = useState<{ session_id: string; user_id: string } | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   
-  // Loading states
-  const [loadingObjectives, setLoadingObjectives] = useState(false);
-  const [loadingAugment, setLoadingAugment] = useState(false);
-  const [loadingFinalize, setLoadingFinalize] = useState(false);
-
-  // Generate objectives
-  const handleGenerateObjectives = async () => {
-    setLoadingObjectives(true);
+  // Query and context
+  const [query, setQuery] = useState('');
+  const [context, setContext] = useState('');
+  
+  // Analysis state
+  const [analysis, setAnalysis] = useState<QueryAnalysis | null>(null);
+  const [contextRequirements, setContextRequirements] = useState<ContextRequirement[]>([]);
+  const [showContextPrompt, setShowContextPrompt] = useState(false);
+  
+  // Exploration tree
+  const [nodes, setNodes] = useState<ExplorationNode[]>([]);
+  const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
+  
+  // UI state
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isAugmenting, setIsAugmenting] = useState(false);
+  const [isFinalizing, setIsFinalizing] = useState(false);
+  
+  // Active node
+  const activeNode = nodes.find(n => n.id === activeNodeId);
+  const activeObjective = activeNode?.selected_objective;
+  
+  // Initialize
+  useEffect(() => {
+    initializeSession().then(setSession).finally(() => setIsLoading(false));
+  }, []);
+  
+  // Analyze query before generating
+  const handleAnalyze = async () => {
+    if (!session || !query.trim()) return;
+    
+    setIsAnalyzing(true);
     try {
-      const response = await generateObjectives(query, contextBlob || undefined);
-      setObjectives(response.objectives);
-      setGlobalQuestions(response.global_questions);
-      setSelectedObjective(null);
-      setFacetAnswers({});
-      setEvidenceItems([]);
-      setAugmentedAnswer('');
-      setFinalAnswer(null);
+      const data = await analyzeQuery(query, context, session);
+      setAnalysis(data.analysis);
+      
+      // Check if context is sufficient
+      if (data.context_assessment && !data.context_assessment.is_sufficient) {
+        const missing = data.context_assessment.missing_requirements || [];
+        setContextRequirements(missing);
+        setShowContextPrompt(true);
+      } else {
+        // Context is sufficient, proceed to generate
+        setShowContextPrompt(false);
+        await handleGenerate();
+      }
     } catch (error) {
-      console.error('Error generating objectives:', error);
-      alert('Failed to generate objectives. Please check if the backend is running.');
+      console.error('Error analyzing:', error);
+      alert('Failed to analyze query.');
     } finally {
-      setLoadingObjectives(false);
+      setIsAnalyzing(false);
     }
   };
-
+  
+  // Generate objectives (after analysis)
+  const handleGenerate = async () => {
+    if (!session || !query.trim()) return;
+    
+    setIsGenerating(true);
+    setShowContextPrompt(false);
+    
+    try {
+      const data = await generateDynamicObjectives(query, context, session, 5);
+      
+      // Check if we got a context prompt instead of objectives
+      if (data.status === 'context_needed') {
+        setContextRequirements(data.missing_requirements || []);
+        setShowContextPrompt(true);
+        setIsGenerating(false);
+        return;
+      }
+      
+      const newNode: ExplorationNode = {
+        id: `node-${Date.now()}`,
+        parent_id: null,
+        query: query,
+        context: context,
+        objectives: data.objectives,
+        answers: {},
+        evidence: [],
+        timestamp: Date.now(),
+        depth: 0,
+        dynamic_type: data.router_info?.context_hints?.dynamic_type
+      };
+      
+      setNodes([newNode]);
+      setActiveNodeId(newNode.id);
+    } catch (error) {
+      console.error('Error generating:', error);
+      alert('Failed to generate objectives.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+  
   // Select objective
-  const handleSelectObjective = (objective: Objective) => {
-    setSelectedObjective(objective);
-    setFacetAnswers({});
-    setEvidenceItems([]);
-    setAugmentedAnswer('');
-    setFinalAnswer(null);
+  const handleSelectObjective = (objective: EnhancedObjective) => {
+    if (!activeNode) return;
+    
+    const updatedNodes = nodes.map(n => 
+      n.id === activeNode.id 
+        ? { ...n, selected_objective: objective, answers: {} }
+        : n
+    );
+    setNodes(updatedNodes);
   };
-
+  
+  // Update answer
+  const handleAnswerChange = (question: string, answer: string) => {
+    if (!activeNode) return;
+    
+    const updatedNodes = nodes.map(n => 
+      n.id === activeNode.id 
+        ? { ...n, answers: { ...n.answers, [question]: answer } }
+        : n
+    );
+    setNodes(updatedNodes);
+  };
+  
   // Augment with context
-  const handleAugmentWithContext = async () => {
-    if (!selectedObjective || !contextBlob) return;
+  const handleAugment = async () => {
+    if (!session || !activeNode || !activeObjective || !context.trim()) return;
     
-    setLoadingAugment(true);
+    setIsAugmenting(true);
     try {
-      const response = await augmentWithContext(query, selectedObjective.id, selectedObjective.definition, contextBlob);
-      setEvidenceItems(response.evidence_items);
-      setAugmentedAnswer(response.augmented_answer || '');
-    } catch (error) {
-      console.error('Error augmenting with context:', error);
-      alert('Failed to augment with context.');
-    } finally {
-      setLoadingAugment(false);
-    }
-  };
-
-  // Finalize answer
-  const handleFinalizeAnswer = async () => {
-    if (!selectedObjective) return;
-    
-    setLoadingFinalize(true);
-    try {
-      const response = await finalizeAnswer(
-        query, 
-        selectedObjective, 
-        facetAnswers, 
-        contextBlob || undefined, 
-        evidenceItems.length > 0 ? evidenceItems : undefined
+      const data = await augmentWithContext(
+        activeNode.query,
+        activeObjective.id,
+        activeObjective.definition,
+        context,
+        session
       );
-      setFinalAnswer(response);
+      
+      const updatedNodes = nodes.map(n => 
+        n.id === activeNode.id 
+          ? { ...n, evidence: data.evidence_items }
+          : n
+      );
+      setNodes(updatedNodes);
     } catch (error) {
-      console.error('Error finalizing answer:', error);
-      alert('Failed to finalize answer.');
+      console.error('Error:', error);
     } finally {
-      setLoadingFinalize(false);
+      setIsAugmenting(false);
     }
   };
-
+  
+  // Finalize
+  const handleFinalize = async () => {
+    if (!session || !activeNode || !activeObjective) return;
+    
+    setIsFinalizing(true);
+    try {
+      const data = await finalizeAnswer(
+        activeNode.query,
+        activeObjective,
+        activeNode.answers,
+        session
+      );
+      
+      const updatedNodes = nodes.map(n => 
+        n.id === activeNode.id 
+          ? { ...n, final_answer: data.final_answer }
+          : n
+      );
+      setNodes(updatedNodes);
+    } catch (error) {
+      console.error('Error:', error);
+      alert('Failed to generate answer.');
+    } finally {
+      setIsFinalizing(false);
+    }
+  };
+  
+  // Navigate
+  const navigateToNode = (nodeId: string) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (node) {
+      setActiveNodeId(nodeId);
+      setQuery(node.query);
+      setContext(node.context);
+    }
+  };
+  
   // Reset
   const handleReset = () => {
-    setObjectives([]);
-    setGlobalQuestions([]);
-    setSelectedObjective(null);
-    setFacetAnswers({});
-    setEvidenceItems([]);
-    setAugmentedAnswer('');
-    setFinalAnswer(null);
-    setContextBlob('');
+    setQuery('');
+    setContext('');
+    setNodes([]);
+    setActiveNodeId(null);
+    setAnalysis(null);
+    setContextRequirements([]);
+    setShowContextPrompt(false);
   };
-
-  // Calculate objective stats (like original topicStats)
-  const objectiveStats = objectives.reduce((acc, obj) => {
-    // For display purposes, we'll count signals as a proxy for "candidates"
-    acc[obj.id] = obj.signals.length;
-    return acc;
-  }, {} as Record<string, number>);
-
-  // Order objectives by signal count (like original topicCardOrder)
-  const objectiveCardOrder = [...objectives].sort((a, b) => b.signals.length - a.signals.length);
-
-  // Filter objectives (for now, just show all)
-  const filteredObjectives = objectives;
-
-  // Synthesize preview (like original synthesizedPreview)
-  const synthesizedPreview = selectedObjective ? [
-    `Interpretation: ${selectedObjective.subtitle}`,
-    `Definition: ${selectedObjective.definition}`,
-    `Common signals: ${selectedObjective.signals.slice(0, 5).join(', ')}`,
-    `Facet questions: ${selectedObjective.facet_questions.length}`,
-  ].join('\n') : null;
-
+  
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Initializing...</p>
+        </div>
+      </div>
+    );
+  }
+  
   return (
-    <div className="min-h-screen bg-neutral-50 p-6">
-      <div className="mx-auto max-w-6xl space-y-6">
-        {/* Header - using original styling */}
-        <div className="rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-            <div>
-              <div className="text-lg font-semibold text-neutral-900">
-                Underspecified Query Topic Explorer (SECI-PoC)
-              </div>
-              <div className="text-sm text-neutral-600">
-                Type a query → generate diverse objective clusters → select objective → clarify with facet questions → augment with context → synthesize final answer.
-              </div>
+    <div className="min-h-screen bg-gray-50 flex">
+      {/* Sidebar - Exploration Tree */}
+      <div className="w-80 bg-white border-r border-gray-200 flex flex-col">
+        <div className="p-4 border-b border-gray-200">
+          <h1 className="text-lg font-bold text-gray-900">Dynamic Query Explorer</h1>
+          <p className="text-xs text-gray-500 mt-1">AI-generated types • Smart context detection</p>
+        </div>
+        
+        <div className="flex-1 overflow-y-auto p-4">
+          {nodes.length === 0 ? (
+            <div className="text-sm text-gray-500 text-center py-8">
+              Start a query to begin exploration
             </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={handleGenerateObjectives}
-                disabled={loadingObjectives || !query.trim()}
-                className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {loadingObjectives ? 'Generating...' : 'Generate objectives'}
-              </button>
+          ) : (
+            <div className="space-y-2">
+              {nodes.map(node => (
+                <button
+                  key={node.id}
+                  onClick={() => navigateToNode(node.id)}
+                  className={cn(
+                    'w-full text-left p-3 rounded-lg border transition-all',
+                    activeNodeId === node.id
+                      ? 'bg-blue-50 border-blue-300'
+                      : 'bg-white border-gray-200 hover:border-gray-300'
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono text-gray-400">L{node.depth}</span>
+                    <span className="text-sm font-medium text-gray-900 truncate">
+                      {node.query.slice(0, 40)}...
+                    </span>
+                  </div>
+                  {node.dynamic_type && (
+                    <div className="text-xs text-blue-600 mt-1">
+                      Type: {node.dynamic_type}
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      
+      {/* Main content */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="bg-white border-b border-gray-200 p-4">
+          <div className="flex gap-4">
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Enter your research question..."
+              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onKeyDown={(e) => e.key === 'Enter' && handleAnalyze()}
+            />
+            <button
+              onClick={handleAnalyze}
+              disabled={isAnalyzing || isGenerating || !query.trim()}
+              className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+            >
+              {isAnalyzing ? 'Analyzing...' : isGenerating ? 'Generating...' : 'Explore'}
+            </button>
+            {nodes.length > 0 && (
               <button
                 onClick={handleReset}
-                className="rounded-xl border border-neutral-200 bg-white px-4 py-2 text-sm font-semibold text-neutral-900 hover:bg-neutral-50"
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
               >
                 Reset
               </button>
-            </div>
+            )}
           </div>
-
-          {/* Query input */}
-          <div className="mt-5 grid gap-3 md:grid-cols-12 md:items-center">
-            <div className="md:col-span-8">
-              <label className="mb-1 block text-xs font-medium text-neutral-700">User query</label>
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="e.g., best breakfast options"
-                className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none ring-0 focus:border-neutral-300"
-              />
-              <div className="mt-1 text-xs text-neutral-500">
-                SECI PoC: objectives generated via LLM, facet questions for clarification, context augmentation available.
-              </div>
-            </div>
-            <div className="md:col-span-4">
-              <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3">
-                <div className="text-xs font-medium text-neutral-700">Status</div>
-                <div className="mt-1 text-sm text-neutral-900">
-                  {objectives.length > 0 ? (
-                    <>
-                      Objectives: <span className="font-semibold">{objectives.length}</span> · Facet Questions:{' '}
-                      <span className="font-semibold">{selectedObjective?.facet_questions.length || 0}</span>
-                    </>
-                  ) : (
-                    'No objectives generated.'
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Context blob input */}
+          
+          {/* Context input */}
           <div className="mt-3">
-            <label className="mb-1 block text-xs font-medium text-neutral-700">Context evidence (optional)</label>
             <textarea
-              value={contextBlob}
-              onChange={(e) => setContextBlob(e.target.value)}
-              placeholder="Paste relevant context, papers, data, or notes here..."
-              rows={4}
-              className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none ring-0 focus:border-neutral-300"
+              value={context}
+              onChange={(e) => setContext(e.target.value)}
+              placeholder="Context: papers, data, experimental notes, constraints, timeline... (optional but recommended)"
+              rows={3}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
             />
           </div>
-        </div>
-
-        {/* Main grid - using original layout */}
-        <div className="grid gap-6 lg:grid-cols-12">
-          {/* Left: Objectives */}
-          <div className="lg:col-span-5">
-            <div className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm">
-              <SectionTitle title="Objective clusters" subtitle="Click one to explore and clarify" />
-
-              {loadingObjectives ? (
-                <LoadingSpinner />
-              ) : objectives.length === 0 ? (
-                <div className="text-center py-8 text-sm text-neutral-600">
-                  Generate objectives to see clusters
+          
+          {/* Dynamic type info */}
+          {analysis && (
+            <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-sm font-medium text-blue-900">
+                    Detected Type: {analysis.query_type.name}
+                  </span>
+                  <span className="text-xs text-blue-600 ml-2">
+                    ({analysis.query_type.complexity})
+                  </span>
                 </div>
-              ) : (
-                <div className="grid gap-3">
-                  {objectiveCardOrder.map((obj) => {
-                    const count = objectiveStats[obj.id] ?? 0;
-                    const active = selectedObjective?.id === obj.id;
-                    const disabled = !objectives.length || count === 0;
-
-                    return (
-                      <button
-                        key={obj.id}
-                        disabled={disabled}
-                        onClick={() => handleSelectObjective(obj)}
-                        className={classNames(
-                          'rounded-2xl border p-4 text-left transition',
-                          disabled
-                            ? 'cursor-not-allowed border-neutral-200 bg-neutral-50 opacity-60'
-                            : active
-                            ? 'border-neutral-900 bg-neutral-50'
-                            : 'border-neutral-200 bg-white hover:bg-neutral-50'
-                        )}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="text-sm font-semibold text-neutral-900">{obj.title}</div>
-                            <div className="mt-1 text-xs text-neutral-600">{obj.subtitle}</div>
-                          </div>
-                          <div className="flex flex-col items-end gap-2">
-                            <Pill>{count} signals</Pill>
-                            {active ? <Pill>Selected</Pill> : null}
-                          </div>
-                        </div>
-
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {obj.signals.slice(0, 4).map((signal) => (
-                            <Pill key={signal}>{signal}</Pill>
-                          ))}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Right: Details */}
-          <div className="lg:col-span-7">
-            <div className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm">
-              <SectionTitle
-                title={selectedObjective ? `Unroll: ${selectedObjective.title}` : 'Select an objective to unroll'}
-                subtitle={
-                  selectedObjective
-                    ? 'View the objective definition, facet questions, and synthesize final answer.'
-                    : objectives.length > 0
-                    ? 'Objectives are ready. Choose one on the left.'
-                    : 'Generate objectives first.'
-                }
-              />
-
-              {/* Roll-up panel */}
-              <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="text-sm font-semibold text-neutral-900">Rolled-up interpretation</div>
-                  {selectedObjective ? (
-                    <button
-                      onClick={() => setSelectedObjective(null)}
-                      className="rounded-xl border border-neutral-200 bg-white px-3 py-1.5 text-xs font-semibold text-neutral-900 hover:bg-neutral-50"
-                    >
-                      Clear selection
-                    </button>
-                  ) : null}
-                </div>
-                <div className="mt-2 whitespace-pre-wrap text-sm text-neutral-800">
-                  {synthesizedPreview ?? (
-                    <span className="text-neutral-600">
-                      Pick an objective to see its rolled-up interpretation.
-                    </span>
-                  )}
+                <div className="text-xs text-blue-600">
+                  Est. time: {analysis.query_type.estimated_time_seconds}s
                 </div>
               </div>
-
-              {/* Facet questions */}
-              {selectedObjective && (
-                <div className="mt-4">
-                  <div className="text-sm font-semibold text-neutral-900">Facet clarifying questions</div>
-                  <div className="mt-2 grid gap-2">
-                    {selectedObjective.facet_questions.map((question, index) => (
-                      <div key={index} className="rounded-xl border border-neutral-200 bg-white p-3 text-sm text-neutral-800">
-                        {question}
-                      </div>
-                    ))}
-                  </div>
-                  
-                  {/* Interactive facet answers */}
-                  <div className="mt-3">
-                    <div className="text-xs font-medium text-neutral-700 mb-2">Your answers:</div>
-                    {selectedObjective.facet_questions.map((question, index) => (
-                      <div key={index} className="mb-2">
-                        <input
-                          type="text"
-                          placeholder={`Answer: ${question}`}
-                          value={facetAnswers[question] || ''}
-                          onChange={(e) => setFacetAnswers(prev => ({ ...prev, [question]: e.target.value }))}
-                          className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none ring-0 focus:border-neutral-300"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Context augmentation */}
-              {selectedObjective && contextBlob && (
-                <div className="mt-4">
-                  <button
-                    onClick={handleAugmentWithContext}
-                    disabled={loadingAugment}
-                    className="w-full rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm font-semibold text-neutral-900 hover:bg-neutral-50 disabled:opacity-50"
-                  >
-                    {loadingAugment ? 'Augmenting...' : 'Augment with context'}
-                  </button>
-                </div>
-              )}
-
-              {/* Evidence items */}
-              {evidenceItems.length > 0 && (
-                <div className="mt-4">
-                  <div className="text-sm font-semibold text-neutral-900">Extracted evidence</div>
-                  <div className="mt-2 space-y-2">
-                    {evidenceItems.map((evidence) => (
-                      <div key={evidence.id} className="rounded-xl border border-neutral-200 bg-neutral-50 p-3">
-                        <div className="text-xs font-medium text-neutral-700">{evidence.title}</div>
-                        <div className="mt-1 text-sm text-neutral-800">{evidence.snippet}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Exemplar/Augmented answer preview */}
-              {selectedObjective && (
-                <div className="mt-4">
-                  <div className="text-sm font-semibold text-neutral-900">Answer preview</div>
-                  <div className="mt-2 rounded-xl border border-neutral-200 bg-neutral-50 p-3">
-                    <div className="text-sm text-neutral-800">
-                      {augmentedAnswer || selectedObjective.exemplar_answer}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Finalize button */}
-              {selectedObjective && (
-                <div className="mt-4">
-                  <button
-                    onClick={handleFinalizeAnswer}
-                    disabled={loadingFinalize}
-                    className="w-full rounded-xl bg-neutral-900 px-4 py-3 text-sm font-semibold text-white shadow-sm hover:bg-neutral-800 disabled:opacity-50"
-                  >
-                    {loadingFinalize ? 'Finalizing...' : 'Generate final answer'}
-                  </button>
-                </div>
-              )}
-
-              {/* Final answer */}
-              {finalAnswer && (
-                <div className="mt-4">
-                  <div className="text-sm font-semibold text-neutral-900">Final answer</div>
-                  <div className="mt-2 rounded-xl border border-neutral-200 bg-neutral-50 p-4">
-                    <div className="text-sm text-neutral-900 mb-3">{finalAnswer.final_answer}</div>
-                    
-                    {finalAnswer.assumptions.length > 0 && (
-                      <div className="mt-3">
-                        <div className="text-xs font-medium text-neutral-700">Assumptions</div>
-                        <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-neutral-600">
-                          {finalAnswer.assumptions.map((assumption, index) => (
-                            <li key={index}>{assumption}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {finalAnswer.next_questions.length > 0 && (
-                      <div className="mt-3">
-                        <div className="text-xs font-medium text-neutral-700">Next questions</div>
-                        <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-neutral-600">
-                          {finalAnswer.next_questions.map((question, index) => (
-                            <li key={index}>{question}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
+              <div className="text-xs text-blue-700 mt-1">
+                {analysis.query_type.description}
+              </div>
             </div>
-          </div>
+          )}
         </div>
-
-        {/* Global questions */}
-        {globalQuestions.length > 0 && (
-          <div className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm">
-            <SectionTitle title="Global clarifying questions" subtitle="Cross-cutting questions for any objective" />
-            <div className="grid gap-2 md:grid-cols-2">
-              {globalQuestions.map((question, index) => (
-                <div key={index} className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-800">
-                  {question}
+        
+        {/* Context Requirements Prompt */}
+        {showContextPrompt && contextRequirements.length > 0 && (
+          <div className="bg-amber-50 border-b border-amber-200 p-4">
+            <div className="flex items-start gap-3">
+              <div className="text-amber-600 text-xl">⚠️</div>
+              <div className="flex-1">
+                <h3 className="font-semibold text-amber-900">Additional Context Recommended</h3>
+                <p className="text-sm text-amber-700 mt-1">
+                  To generate the most relevant objectives, please provide:
+                </p>
+                <div className="mt-3 space-y-2">
+                  {contextRequirements.map((req, idx) => (
+                    <div key={idx} className="bg-white p-3 rounded border border-amber-200">
+                      <div className="flex items-center gap-2 mb-1">
+                        <RequirementBadge importance={req.importance} />
+                        <span className="font-medium text-gray-900">{req.description}</span>
+                      </div>
+                      <p className="text-sm text-gray-600">{req.why}</p>
+                      <p className="text-xs text-gray-500 mt-1">Example: {req.example}</p>
+                    </div>
+                  ))}
                 </div>
-              ))}
+                <div className="mt-4 flex gap-2">
+                  <button
+                    onClick={handleGenerate}
+                    className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm"
+                  >
+                    Proceed Anyway
+                  </button>
+                  <button
+                    onClick={() => setShowContextPrompt(false)}
+                    className="px-4 py-2 border border-amber-300 text-amber-700 rounded-lg hover:bg-amber-100 text-sm"
+                  >
+                    Add Context First
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         )}
-
-        {/* Footer: next step */}
-        <div className="rounded-2xl border border-neutral-200 bg-white p-4">
-          <div className="text-sm font-semibold text-neutral-900">SECI Framework Implementation</div>
-          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-neutral-700">
-            <li>Socialization: Generate multiple objective hypotheses via LLM</li>
-            <li>Externalization: Render objectives + facet questions explicitly in UI</li>
-            <li>Combination: Augment selected objective with external evidence (context blob)</li>
-            <li>Internalization: Store selected objective + answers to reuse as prior (SQLite)</li>
-          </ul>
-        </div>
-
-        {/* Minimal note */}
-        <div className="text-xs text-neutral-500">
-          SECI PoC uses LLM-generated objectives and facet questions. Swap in your embedding-based clusters by mapping each objective to a cluster id, then render clusters dynamically.
+        
+        {/* Main content area */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {!activeNode ? (
+            <div className="max-w-2xl mx-auto text-center py-20">
+              <h2 className="text-2xl font-bold text-gray-900 mb-4">
+                Dynamic Query Analysis
+              </h2>
+              <p className="text-gray-600 mb-8">
+                Enter a research question and our AI will:
+              </p>
+              <ul className="text-left max-w-md mx-auto space-y-3 text-gray-700">
+                <li className="flex items-start gap-2">
+                  <span className="text-blue-600">1.</span>
+                  <span>Analyze your query to determine its unique characteristics</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-blue-600">2.</span>
+                  <span>Identify what context would help generate better results</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="text-blue-600">3.</span>
+                  <span>Generate custom objective types specific to your query</span>
+                </li>
+              </ul>
+            </div>
+          ) : (
+            <div className="max-w-6xl mx-auto space-y-6">
+              {/* Objectives */}
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">
+                  Generated Objectives
+                  {activeNode.dynamic_type && (
+                    <span className="ml-2 text-sm font-normal text-blue-600">
+                      (Type: {activeNode.dynamic_type})
+                    </span>
+                  )}
+                </h3>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {activeNode.objectives.map(objective => (
+                    <button
+                      key={objective.id}
+                      onClick={() => handleSelectObjective(objective)}
+                      className={cn(
+                        'text-left p-4 rounded-lg border-2 transition-all',
+                        activeObjective?.id === objective.id
+                          ? 'border-blue-500 bg-blue-50'
+                          : 'border-gray-200 bg-white hover:border-gray-300'
+                      )}
+                    >
+                      <div className="flex items-start justify-between mb-2">
+                        <h4 className="font-semibold text-gray-900">{objective.title}</h4>
+                        <ConfidenceBadge level={objective.confidence} />
+                      </div>
+                      <p className="text-sm text-gray-600 mb-3">{objective.subtitle}</p>
+                      <p className="text-xs text-gray-500 line-clamp-2">{objective.definition}</p>
+                      {objective.is_speculative && (
+                        <span className="inline-block mt-2 text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded">
+                          Speculative
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              
+              {/* Selected objective detail */}
+              {activeObjective && (
+                <div className="bg-white rounded-lg border border-gray-200 p-6">
+                  <h3 className="text-xl font-bold text-gray-900 mb-4">{activeObjective.title}</h3>
+                  <p className="text-gray-700 mb-4">{activeObjective.definition}</p>
+                  
+                  {activeObjective.when_this_objective_is_wrong && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6">
+                      <div className="text-sm font-medium text-amber-800">When this doesn't apply:</div>
+                      <div className="text-sm text-amber-700">{activeObjective.when_this_objective_is_wrong}</div>
+                    </div>
+                  )}
+                  
+                  {/* Facet questions */}
+                  <div className="mb-6">
+                    <h4 className="font-semibold text-gray-900 mb-3">Clarifying Questions</h4>
+                    <div className="space-y-3">
+                      {activeObjective.facet_questions.map((question, idx) => (
+                        <div key={idx}>
+                          <label className="block text-sm text-gray-700 mb-1">{question}</label>
+                          <input
+                            type="text"
+                            value={activeNode.answers[question] || ''}
+                            onChange={(e) => handleAnswerChange(question, e.target.value)}
+                            placeholder="Your answer..."
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* Context analysis */}
+                  {context.trim() && (
+                    <div className="mb-6">
+                      <button
+                        onClick={handleAugment}
+                        disabled={isAugmenting}
+                        className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 disabled:opacity-50"
+                      >
+                        {isAugmenting ? 'Analyzing...' : 'Analyze Context'}
+                      </button>
+                    </div>
+                  )}
+                  
+                  {/* Evidence */}
+                  {activeNode.evidence.length > 0 && (
+                    <div className="mb-6">
+                      <h4 className="font-semibold text-gray-900 mb-3">Extracted Evidence</h4>
+                      <div className="space-y-3">
+                        {activeNode.evidence.map(item => (
+                          <div key={item.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="font-medium">{item.title}</span>
+                              <SourceBadge quality={item.source_quality} />
+                            </div>
+                            <p className="text-sm text-gray-700">{item.snippet}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Generate answer */}
+                  {!activeNode.final_answer && (
+                    <button
+                      onClick={handleFinalize}
+                      disabled={isFinalizing}
+                      className="w-full py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+                    >
+                      {isFinalizing ? 'Generating...' : 'Generate Grounded Answer'}
+                    </button>
+                  )}
+                  
+                  {/* Final answer */}
+                  {activeNode.final_answer && (
+                    <div className="bg-green-50 border border-green-200 rounded-lg p-6">
+                      <h4 className="font-semibold text-green-900 mb-3">Research Answer</h4>
+                      <div className="text-gray-800 whitespace-pre-wrap">{activeNode.final_answer}</div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

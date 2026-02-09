@@ -1,7 +1,12 @@
 import httpx
 import json
 from typing import Optional, Dict, Any, List
-from models import Objective, AugmentResponse, EvidenceItem, FinalizeResponse
+from models import (
+    AugmentResponse, EvidenceItem, FinalizeResponse,
+    QueryType, EnhancedObjective, QueryRefinement, UncertaintyMarker,
+    ProgressiveDisclosure, Claim, GroundingReport, ActionItem,
+    ConfidenceLevel, SourceQuality, EvidenceType
+)
 
 class OllamaClient:
     def __init__(self, base_url: str = "http://localhost:11434", model: str = "qwen2.5:7b"):
@@ -16,12 +21,12 @@ class OllamaClient:
             "stream": False,
             "options": {
                 "temperature": temperature,
-                "top_p": top_p
+                "top_p": top_p,
+                "num_predict": 2000  # Limit token generation for speed
             }
         }
         
-        # Use longer timeout for LLM generation (5 minutes)
-        timeout = httpx.Timeout(300.0, connect=10.0)
+        timeout = httpx.Timeout(60.0, connect=10.0)  # Reduced timeout
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(f"{self.base_url}/api/generate", json=payload)
             response.raise_for_status()
@@ -30,29 +35,25 @@ class OllamaClient:
     
     async def generate_json(self, prompt: str, max_retries: int = 1) -> Dict[str, Any]:
         """Generate and parse JSON from Ollama with retry logic."""
-        initial_prompt = f"{prompt}\n\nIMPORTANT: Return ONLY valid JSON. No markdown, no code blocks, no explanation."
+        initial_prompt = f"{prompt}\n\nReturn ONLY valid JSON. No markdown."
         response_text = ""
         
         for attempt in range(max_retries + 1):
             if attempt == 0:
                 response_text = await self.generate(initial_prompt)
             else:
-                retry_prompt = f"{initial_prompt}\n\nYour previous output was invalid JSON. Please fix it and return ONLY valid JSON.\n\nPrevious invalid output:\n{response_text}"
+                retry_prompt = f"{initial_prompt}\n\nFix JSON errors. Previous: {response_text[:200]}"
                 response_text = await self.generate(retry_prompt)
             
             try:
-                # Try to extract JSON from response
                 json_part = response_text.strip()
                 
-                # Remove markdown code blocks
                 if "```json" in json_part:
                     json_part = json_part.split("```json")[1].split("```")[0].strip()
                 elif "```" in json_part:
                     json_part = json_part.split("```")[1].split("```")[0].strip()
                 
-                # Try to find JSON object/array if wrapped in text
                 if not json_part.startswith(('{', '[')):
-                    # Find first { or [
                     start_idx = min(
                         (json_part.find('{') if json_part.find('{') != -1 else len(json_part)),
                         (json_part.find('[') if json_part.find('[') != -1 else len(json_part))
@@ -60,7 +61,6 @@ class OllamaClient:
                     if start_idx < len(json_part):
                         json_part = json_part[start_idx:]
                 
-                # Try to find end of JSON if followed by text
                 if json_part.startswith('{'):
                     brace_count = 0
                     for i, char in enumerate(json_part):
@@ -74,118 +74,115 @@ class OllamaClient:
                 
                 return json.loads(json_part)
             except json.JSONDecodeError as e:
-                print(f"DEBUG: JSON parse error on attempt {attempt + 1}: {e}")
-                print(f"DEBUG: Response text: {response_text[:500]}...")
+                print(f"DEBUG: JSON parse error: {e}")
                 if attempt == max_retries:
-                    raise ValueError(f"Failed to parse JSON after {max_retries + 1} attempts. Last error: {e}. Response: {response_text[:200]}")
+                    raise ValueError(f"Failed to parse JSON: {e}")
                 continue
         
-        raise ValueError("Unexpected error in JSON generation")
+        raise ValueError("Unexpected error")
     
-    def get_objectives_prompt(self, query: str, context: Optional[str] = None, k: int = 5) -> str:
-        """Generate the prompt for objective generation."""
-        context_part = f"Context: {context}\n\n" if context else ""
+    def get_objectives_prompt(
+        self, 
+        query: str, 
+        query_type: QueryType,
+        context: Optional[str] = None, 
+        k: int = 5,
+        missing_inputs: Optional[List[str]] = None
+    ) -> str:
+        """Generate optimized, fast prompts for objective generation."""
+        context_part = f"Context: {context}\n" if context else ""
         
-        return f"""You are an expert at interpreting underspecified user queries.
-{context_part}User query: "{query}"
+        return f"""You are an expert at interpreting user queries. Generate {k} distinct objectives FAST.
 
-Task:
-Generate {k} distinct objectives that could represent different interpretations of what 'best' means.
-For each objective, provide:
-- id: obj_1..obj_{k}
-- title: 2-5 words
-- subtitle: what's user is trying to achieve
-- definition: 2-4 lines describing the goal
-- signals: 4-10 indicative keywords
-- facet_questions: 2-4 clarifying questions
-- exemplar_answer: 5-10 lines
+{context_part}Query: "{query}"
+Type: {query_type.value}
 
-Also provide 2-4 global questions broadly useful across objectives.
-
-Return ONLY valid JSON with this structure:
+Return valid JSON only:
 {{
     "objectives": [
         {{
             "id": "obj_1",
-            "title": "title here",
-            "subtitle": "subtitle here",
-            "definition": "definition here",
-            "signals": ["signal1", "signal2"],
+            "title": "2-4 words",
+            "subtitle": "what this means",
+            "definition": "2-3 lines",
+            "signals": ["keyword1", "keyword2"],
             "facet_questions": ["question1", "question2"],
-            "exemplar_answer": "answer here"
+            "when_this_objective_is_wrong": "1 line",
+            "confidence": "medium",
+            "is_speculative": false,
+            "summary": {{"tldr": "1 line", "key_tradeoffs": ["tradeoff"], "next_actions": ["action"]}}
         }}
     ],
-    "global_questions": ["question1", "question2"]
+    "global_questions": ["question1", "question2"],
+    "query_refinements": [
+        {{"refined_query": "improved query", "what_changed": "brief", "why_it_helps": "benefit", "confidence": "medium"}}
+    ]
 }}
 
-Return ONLY valid JSON. No markdown, no code blocks."""
+Be fast and concise."""
     
-    def get_augment_prompt(self, query: str, objective_id: str, objective_definition: str, context_blob: str) -> str:
-        """Generate the prompt for evidence augmentation."""
-        return f"""You are an expert at incorporating external evidence to improve answers based on specific objectives.
+    def get_augment_prompt(
+        self, 
+        query: str, 
+        objective_id: str, 
+        objective_definition: str, 
+        context_blob: str
+    ) -> str:
+        """Generate the prompt for evidence augmentation - simplified."""
+        return f"""Extract evidence from context for this query.
 
 Query: "{query}"
-Selected objective: {objective_id}
-Objective definition: "{objective_definition}"
+Objective: {objective_id}
+Definition: "{objective_definition}"
 
-User context/evidence: "{context_blob}"
+Context:
+""" + context_blob + """
 
-Your task:
-1. Extract 3-7 evidence bullet points from the context that are most relevant to this objective
-2. Rewrite or enhance an answer to incorporate this evidence
-3. Return your response as valid JSON
+Extract 3-5 evidence items. Each item:
+- id: ev_1, ev_2, etc.
+- snippet: relevant excerpt
+- source_quality: primary/review/secondary/anecdotal
+- score: 0.0-1.0
 
-Structure:
-{{
-    "evidence_items": [
-        {{
-            "id": "ev_1",
-            "type": "note",
-            "title": "short descriptive title",
-            "snippet": "relevant excerpt from context",
-            "source_ref": "user_context",
-            "score": 1.0
-        }}
-    ],
-    "augmented_answer": "updated answer using the evidence (or null if no context provided)"
-}}
+Return JSON: {"evidence_items": [...], "need_external_sources": true/false}
 
-Return ONLY valid JSON. No markdown, no code blocks."""
-    
-    def get_finalize_prompt(self, query: str, objective: Objective, answers: Dict[str, str], 
-                          evidence_items: Optional[List[EvidenceItem]] = None) -> str:
-        """Generate the prompt for final answer synthesis."""
+Be fast and concise."""
+
+    def get_finalize_prompt(
+        self, 
+        query: str, 
+        objective: EnhancedObjective, 
+        answers: Dict[str, str],
+        evidence_items: Optional[List[EvidenceItem]] = None
+    ) -> str:
+        """Generate the prompt for final answer synthesis - simplified."""
         evidence_text = ""
         if evidence_items:
-            evidence_snippets = [item.snippet for item in evidence_items]
-            evidence_text = f"\nEvidence to incorporate:\n" + "\n".join(f"- {snippet}" for snippet in evidence_snippets)
+            evidence_text = "\nEvidence:\n" + "\n".join([f"- {e.snippet[:100]}" for e in evidence_items[:3]])
         
-        facet_answers_text = "\n".join(f"- {question}: {answer}" for question, answer in answers.items())
+        facet_text = "\n".join([f"{q}: {a}" for q, a in answers.items()])
         
-        return f"""You are an expert at synthesizing comprehensive answers based on clarified objectives and user preferences.
+        return f"""Generate a concise final answer.
 
 Query: "{query}"
-Selected objective: {objective.title} ({objective.subtitle})
-Objective definition: "{objective.definition}"
+Objective: {objective.title}
 
-User's answers to facet questions:
-{facet_answers_text}{evidence_text}
+User answers:
+{facet_text}{evidence_text}
 
-Generate a final answer that:
-1. Is consistent with the selected objective
-2. Incorporates the user's specific answers to facet questions
-3. Uses the evidence if provided
-4. Clearly states any assumptions made
-5. Suggests relevant follow-up questions
-
-Return your response as valid JSON:
+Return JSON:
 {{
-    "final_answer": "comprehensive answer addressing the query",
-    "assumptions": ["assumption1", "assumption2"],
+    "final_answer": "concise answer (3-5 sentences)",
+    "progressive_disclosure": {{
+        "tldr": "1 sentence summary",
+        "key_tradeoffs": ["tradeoff1", "tradeoff2"],
+        "next_actions": ["action1", "action2"]
+    }},
+    "assumptions": ["assumption1"],
     "next_questions": ["followup1", "followup2"]
 }}
 
-Return ONLY valid JSON. No markdown, no code blocks."""
+Be fast and concise. 200 words max."""
 
 # Global Ollama client
 ollama = OllamaClient()
