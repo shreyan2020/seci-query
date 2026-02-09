@@ -1,33 +1,74 @@
-version: '3.8'
 
 services:
-  backend:
-    build: ./backend
-    ports:
-      - "8000:8000"
-    environment:
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-    depends_on:
-      - ollama
-    volumes:
-      - ./backend/data:/app/data
-
-  frontend:
-    build: ./frontend
-    ports:
-      - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-    depends_on:
-      - backend
-
+  # Ollama LLM service
   ollama:
-    image: ollama/ollama
+    image: ollama/ollama:latest
+    container_name: dsm-ollama
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    command: ["serve"]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # Backend FastAPI service
+  backend:
+    image: shreyansure8/dsm-backend:latest
+
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dsm-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - ollama
+    volumes:
+      - ./backend/data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # Frontend Next.js service
+  frontend:
+    image: shreyansure8/dsm-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    container_name: dsm-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NODE_ENV=production
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
 
 volumes:
   ollama_data:
+    driver: local
+
+networks:
+  default:
+    name: dsm-network
