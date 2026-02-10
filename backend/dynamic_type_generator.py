@@ -44,6 +44,9 @@ class DynamicTypeGenerator:
         self.model = model
         self.analysis_model = "qwen2.5:1.5b"  # Use 1.5B for fast analysis
         self.generation_model = "qwen2.5:7b"  # Use 7B for objectives
+        from ollama_client import OllamaClient
+        self.analysis_llm = OllamaClient(base_url=base_url, model=self.analysis_model)
+        self.generation_llm = OllamaClient(base_url=base_url, model=self.generation_model)
     
     async def analyze_query(self, query: str, existing_context: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -84,62 +87,7 @@ Return JSON analysis:
 
 Be fast and concise."""
 
-        payload = {
-            "model": self.analysis_model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.3,
-                "num_predict": 800
-            }
-        }
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{self.base_url}/api/generate",
-                json=payload
-            )
-            response.raise_for_status()
-            result = response.json()
-            
-            try:
-                # Extract JSON from response
-                text = result.get("response", "")
-                # Find JSON block
-                if "```json" in text:
-                    text = text.split("```json")[1].split("```")[0]
-                elif "```" in text:
-                    text = text.split("```")[1].split("```")[0]
-                
-                return json.loads(text.strip())
-            except Exception as e:
-                print(f"Failed to parse analysis: {e}")
-                # Return fallback analysis
-                return self._fallback_analysis(query)
-    
-    def _fallback_analysis(self, query: str) -> Dict[str, Any]:
-        """Fallback analysis if LLM fails"""
-        return {
-            "query_type": {
-                "name": "General Research",
-                "description": "Broad research query",
-                "characteristics": ["open-ended", "exploratory"],
-                "complexity": "moderate",
-                "estimated_time_seconds": 30
-            },
-            "missing_context": [
-                {
-                    "type": "scope",
-                    "description": "Specific domain or field",
-                    "importance": "recommended",
-                    "why": "Helps focus the objectives",
-                    "example": "molecular biology, clinical research"
-                }
-            ],
-            "suggested_objectives_count": 5,
-            "objective_categories": ["general"],
-            "user_expertise_inferred": "intermediate"
-        }
+        return await self.analysis_llm.generate_json(prompt)
     
     async def generate_dynamic_objectives(
         self, 
@@ -197,47 +145,10 @@ Return JSON:
 
 Tailor to {expertise} level. Be specific to the query domain."""
 
-        payload = {
-            "model": self.generation_model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.7,
-                "num_predict": 2000
-            }
-        }
-        
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{self.base_url}/api/generate",
-                json=payload
-            )
-            response.raise_for_status()
-            result = response.json()
-            
-            try:
-                text = result.get("response", "")
-                # Extract JSON
-                if "```json" in text:
-                    text = text.split("```json")[1].split("```")[0]
-                elif "```" in text:
-                    text = text.split("```")[1].split("```")[0]
-                
-                data = json.loads(text.strip())
-                
-                # Add dynamic metadata
-                data["dynamic_analysis"] = analysis
-                data["query_type_info"] = query_type
-                
-                return data
-            except Exception as e:
-                print(f"Failed to parse objectives: {e}")
-                return {
-                    "objectives": [],
-                    "global_questions": [],
-                    "query_refinements": [],
-                    "dynamic_analysis": analysis
-                }
+        data = await self.generation_llm.generate_json(prompt)
+        data["dynamic_analysis"] = analysis
+        data["query_type_info"] = query_type
+        return data
     
     async def check_context_sufficiency(
         self, 
@@ -249,50 +160,25 @@ Tailor to {expertise} level. Be specific to the query domain."""
         Check if provided context is sufficient
         Return what's missing and recommendations
         """
-        missing = analysis.get("missing_context", [])
-        
-        # Check what context was already provided
-        provided_signals = []
-        if provided_context:
-            provided_signals = self._extract_context_signals(provided_context)
-        
-        # Determine what's still missing
-        still_needed = []
-        for req in missing:
-            req_type = req.get("type", "")
-            # Simple check - in real implementation could be more sophisticated
-            if not any(req_type in signal.lower() for signal in provided_signals):
-                still_needed.append(req)
-        
-        return {
-            "is_sufficient": len(still_needed) == 0,
-            "missing_requirements": still_needed,
-            "provided_signals": provided_signals,
-            "can_proceed": len(still_needed) == 0 or all(
-                r.get("importance") != "required" for r in still_needed
-            )
-        }
-    
-    def _extract_context_signals(self, context: str) -> List[str]:
-        """Extract what types of context are provided"""
-        signals = []
-        context_lower = context.lower()
-        
-        # Simple keyword matching
-        if any(word in context_lower for word in ['paper', 'study', 'research', 'journal']):
-            signals.append("research")
-        if any(word in context_lower for word in ['data', 'dataset', 'results', 'experiment']):
-            signals.append("data")
-        if any(word in context_lower for word in ['biology', 'cell', 'gene', 'protein']):
-            signals.append("biology")
-        if any(word in context_lower for word in ['clinical', 'patient', 'trial', 'treatment']):
-            signals.append("clinical")
-        if any(word in context_lower for word in ['timeline', 'deadline', 'schedule']):
-            signals.append("timeline")
-        if any(word in context_lower for word in ['budget', 'cost', 'price', 'expensive']):
-            signals.append("constraints")
-            
-        return signals
+        prompt = f"""Assess if the provided context is sufficient for this query.
+
+Query: "{query}"
+Analysis: {json.dumps(analysis)}
+Provided Context: {provided_context or ""}
+
+Return JSON:
+{{
+  "is_sufficient": true|false,
+  "missing_requirements": [{{"type": "...", "description": "...", "importance": "required|recommended|optional", "why": "...", "example": "..."}}],
+  "can_proceed": true|false
+}}
+
+Rules:
+- Only include truly missing context
+- If missing required info, can_proceed should be false
+"""
+
+        return await self.analysis_llm.generate_json(prompt)
     
     async def generate_context_prompt(
         self, 

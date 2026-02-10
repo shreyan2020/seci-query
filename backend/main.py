@@ -20,8 +20,6 @@ from query_router import router
 from persona_manager import persona_manager
 from dynamic_type_generator import dynamic_generator
 from uncertainty_gate import uncertainty_gate, UncertaintyAssessment
-from task_causal_graph import tcg_library
-from voi_question_selector import info_controller
 from dynamic_graph_generator import dynamic_graph_generator, DynamicCausalGraph
 
 app = FastAPI(
@@ -71,7 +69,7 @@ async def generate_objectives(
     
     try:
         # Step 1: Classify query type
-        router_result = router.classify(request.query, request.context)
+        router_result = await router.classify(request.query, request.context)
         print(f"DEBUG: Query classified as {router_result.query_type.value} (confidence: {router_result.confidence:.2f})")
         
         # Step 2: Get user persona optimization hints
@@ -479,7 +477,7 @@ async def refine_query(
         )
         
         # Generate new objectives with context
-        router_result = router.classify(new_request.query, new_request.context)
+        router_result = await router.classify(new_request.query, new_request.context)
         prompt = ollama.get_objectives_prompt(
             query=new_request.query,
             query_type=router_result.query_type,
@@ -822,42 +820,38 @@ async def assess_uncertainty(
         session_id = x_session_id or str(uuid.uuid4())
         user_id = x_user_id or f"anonymous_{session_id[:8]}"
         
-        # Step 1: Run information-aware controller
-        decision = await info_controller.process_query(query, context)
+        # Step 1: Run LLM uncertainty assessment
+        assessment = await uncertainty_gate.assess_uncertainty(query, context)
         
         # Step 2: Log assessment
         await log_event_safe("uncertainty_assessed", {
             "session_id": session_id,
             "user_id": user_id,
             "query": query,
-            "uncertainty_score": decision["uncertainty_score"],
-            "confidence_level": decision["confidence_level"],
-            "strategy": decision["strategy"],
-            "need_disambiguation": decision["need_disambiguation"]
+            "uncertainty_score": assessment.total_score,
+            "confidence_level": assessment.confidence_level,
+            "strategy": "disambiguate" if assessment.need_disambiguation else "proceed",
+            "need_disambiguation": assessment.need_disambiguation
         })
         
         return {
             "schema_version": "2.1.0",
             "query": query,
             "uncertainty_assessment": {
-                "score": decision["uncertainty_score"],
-                "level": decision["confidence_level"],
-                "need_disambiguation": decision["need_disambiguation"]
+                "score": assessment.total_score,
+                "level": assessment.confidence_level,
+                "need_disambiguation": assessment.need_disambiguation
             },
-            "strategy": decision["strategy"],
-            "template": {
-                "id": decision["template_id"],
-                "name": decision["template_name"]
-            },
-            "critical_questions": decision.get("critical_questions", []),
+            "strategy": "disambiguate" if assessment.need_disambiguation else "proceed",
+            "critical_questions": [],
             "missing_context": {
-                "critical": decision.get("critical_missing", []),
-                "recommended": decision.get("recommended_missing", [])
+                "critical": assessment.critical_missing,
+                "recommended": assessment.recommended_missing
             },
-            "can_proceed": decision.get("can_proceed_with_defaults", True),
+            "can_proceed": assessment.can_proceed_directly,
             "recommendation": {
-                "action": "disambiguate" if decision["need_disambiguation"] else "proceed",
-                "reason": decision.get("notes", "")
+                "action": "disambiguate" if assessment.need_disambiguation else "proceed",
+                "reason": "LLM uncertainty assessment"
             },
             "session_id": session_id,
             "user_id": user_id
@@ -876,17 +870,10 @@ async def generate_smart_objectives(
     x_session_id: Optional[str] = Header(None)
 ):
     """
-    ADVANCED: Smart objective generation with conditional disambiguation.
+    ADVANCED: Fully dynamic objective generation (LLM-driven).
     
-    This endpoint intelligently decides:
-    - If uncertainty is LOW: Skip objective clusters, return execution plan directly
-    - If uncertainty is HIGH: Generate objective clusters + VOI-driven questions
-    
-    Uses the complete information-aware pipeline:
-    1. Uncertainty Gate assessment
-    2. Task Causal Graph template selection
-    3. VOI-driven question selection (only ask what matters)
-    4. Conditional objective generation
+    This endpoint always returns objective clusters for user selection.
+    Workflow graphs are generated after the objective is selected.
     """
     start_time = time.time()
     
@@ -894,202 +881,65 @@ async def generate_smart_objectives(
     user_id = x_user_id or f"anonymous_{session_id[:8]}"
     
     try:
-        # Step 1: Assess uncertainty
-        decision = await info_controller.process_query(
-            request.query, 
-            request.context
+        assessment = await uncertainty_gate.assess_uncertainty(request.query, request.context)
+        analysis = await dynamic_generator.analyze_query(request.query, request.context)
+        response_data = await dynamic_generator.generate_dynamic_objectives(
+            request.query,
+            analysis,
+            request.context,
+            request.k
         )
-        
-        strategy = decision["strategy"]
-        
-        if strategy == "plan_directly":
-            # LOW UNCERTAINTY: Skip disambiguation, return plan directly
-            
-            # Get or create objectives based on template
-            execution_plan = decision.get("execution_plan", [])
-            
-            # Generate a single "objective" representing the direct approach
-            direct_objective = EnhancedObjective(
-                id="direct_plan",
-                title=f"Direct: {decision['template_name']}",
-                subtitle="Proceeding with execution plan",
-                definition=f"Based on low uncertainty (score: {decision['uncertainty_score']:.2f}), "
-                          f"proceeding directly with {decision['template_name']} workflow.",
-                signals=["direct_execution", "low_uncertainty"],
-                facet_questions=[],  # No questions needed
-                confidence="high",
-                is_speculative=False,
-                summary=ProgressiveDisclosure(
-                    tldr=f"Direct execution: {decision['template_name']}",
-                    key_tradeoffs=["Faster execution", "No disambiguation needed"],
-                    next_actions=["Review execution plan", "Proceed with workflow"],
-                    details=None,
-                    glossary=None
-                ),
-                exemplar_answer=None,
-                when_this_objective_is_wrong=None,
-                expected_output_format=None,
-                rationale=None
-            )
-            
-            processing_time = time.time() - start_time
-            
-            await log_event_safe("smart_objectives_direct", {
-                "session_id": session_id,
-                "user_id": user_id,
-                "query": request.query,
-                "uncertainty_score": decision["uncertainty_score"],
-                "strategy": "direct",
-                "template": decision["template_id"]
-            })
-            
-            return ObjectivesResponse(
-                schema_version="2.1.0",
-                objectives=[direct_objective],
-                global_questions=[],
-                router_info=RouterInfo(
-                    query_type=QueryType.DYNAMIC,
-                    confidence=1.0 - decision["uncertainty_score"],
-                    missing_inputs=[],
-                    recommended_workflow="direct_execution",
-                    context_hints={
-                        "strategy": "direct",
-                        "uncertainty_score": decision["uncertainty_score"],
-                        "execution_plan_steps": len(execution_plan),
-                        "template": decision["template_name"]
-                    }
-                ),
-                query_refinements=[],
-                uncertainty_markers=[],
-                progressive_summary=ProgressiveDisclosure(
-                    tldr=f"Low uncertainty detected. Proceeding directly with {decision['template_name']}.",
-                    key_tradeoffs=["Fast execution", "Confidence: " + decision["confidence_level"]],
-                    next_actions=["Review plan", "Execute workflow"],
-                    details=None,
-                    glossary=None
-                ),
-                processing_metadata={
-                    "processing_time_ms": int(processing_time * 1000),
-                    "strategy": "direct",
-                    "uncertainty_score": decision["uncertainty_score"],
-                    "template_id": decision["template_id"],
-                    "execution_plan": execution_plan,
-                    "session_id": session_id,
-                    "user_id": user_id
+
+        objectives = [EnhancedObjective(**obj) for obj in response_data.get("objectives", [])]
+        processing_time = time.time() - start_time
+
+        await log_event_safe("smart_objectives_dynamic", {
+            "session_id": session_id,
+            "user_id": user_id,
+            "query": request.query,
+            "objective_count": len(objectives),
+            "uncertainty_score": assessment.total_score
+        })
+
+        missing_inputs = [
+            req.get("description", "")
+            for req in analysis.get("missing_context", [])
+            if isinstance(req, dict)
+        ]
+
+        return ObjectivesResponse(
+            schema_version="2.2.0",
+            objectives=objectives,
+            global_questions=response_data.get("global_questions", []),
+            router_info=RouterInfo(
+                query_type=QueryType.DYNAMIC,
+                confidence=1.0 - assessment.total_score,
+                missing_inputs=missing_inputs,
+                recommended_workflow="select_objective",
+                context_hints={
+                    "strategy": "select_objective",
+                    "uncertainty_score": assessment.total_score
                 }
-            )
-        
-        else:
-            # HIGH UNCERTAINTY: Generate objective clusters + questions
-            
-            # Get critical questions from VOI analysis
-            critical_questions = decision.get("critical_questions", [])
-            
-            # Generate objectives using dynamic generator
-            response_data = await dynamic_generator.generate_dynamic_objectives(
-                query=request.query,
-                analysis={
-                    "query_type": {
-                        "name": decision["template_name"],
-                        "description": "Auto-selected based on query",
-                        "characteristics": ["uncertainty_driven"],
-                        "complexity": "high",
-                        "estimated_time_seconds": 45
-                    },
-                    "objective_categories": [decision["template_id"]],
-                    "user_expertise_inferred": "intermediate"
-                },
-                context=request.context,
-                k=request.k
-            )
-            
-            # Parse objectives
-            objectives = []
-            for obj_data in response_data.get("objectives", []):
-                if "summary" not in obj_data:
-                    obj_data["summary"] = {
-                        "tldr": obj_data.get("subtitle", ""),
-                        "key_tradeoffs": [],
-                        "next_actions": []
-                    }
-                objectives.append(EnhancedObjective(**obj_data))
-            
-            # Add VOI-driven questions as facet questions to first objective
-            # This ensures the questions are prominently displayed
-            if objectives and critical_questions:
-                for i, obj in enumerate(objectives):
-                    # Distribute questions across objectives
-                    start_idx = i * 2
-                    end_idx = start_idx + 2
-                    obj_questions = critical_questions[start_idx:end_idx]
-                    obj.facet_questions = [q["question"] for q in obj_questions]
-            
-            # Parse refinements
-            query_refinements = [
+            ),
+            query_refinements=[
                 QueryRefinement(**ref) for ref in response_data.get("query_refinements", [])
-            ]
-            
-            uncertainty_markers = [
-                UncertaintyMarker(**um) for um in response_data.get("uncertainty_markers", [])
-            ]
-            
-            processing_time = time.time() - start_time
-            
-            await log_event_safe("smart_objectives_disambiguate", {
+            ],
+            uncertainty_markers=[],
+            progressive_summary=ProgressiveDisclosure(
+                tldr="Objectives generated. Select one to generate workflow.",
+                key_tradeoffs=["Multiple interpretations"],
+                next_actions=["Select an objective"],
+                details=None,
+                glossary=None
+            ),
+            processing_metadata={
+                "processing_time_ms": int(processing_time * 1000),
+                "strategy": "select_objective",
+                "uncertainty_score": assessment.total_score,
                 "session_id": session_id,
-                "user_id": user_id,
-                "query": request.query,
-                "uncertainty_score": decision["uncertainty_score"],
-                "strategy": "disambiguate",
-                "num_objectives": len(objectives),
-                "num_critical_questions": len(critical_questions)
-            })
-            
-            return ObjectivesResponse(
-                schema_version="2.1.0",
-                objectives=objectives,
-                global_questions=[q["question"] for q in critical_questions[:3]],
-                router_info=RouterInfo(
-                    query_type=QueryType.DYNAMIC,
-                    confidence=1.0 - decision["uncertainty_score"],
-                    missing_inputs=decision.get("critical_missing", []),
-                    recommended_workflow="disambiguation_required",
-                    context_hints={
-                        "strategy": "disambiguate",
-                        "uncertainty_score": decision["uncertainty_score"],
-                        "template": decision["template_name"],
-                        "critical_questions_count": len(critical_questions),
-                        "reasons": decision.get("reasons", [])
-                    }
-                ),
-                query_refinements=query_refinements,
-                uncertainty_markers=uncertainty_markers,
-                progressive_summary=ProgressiveDisclosure(
-                    tldr=f"High uncertainty detected ({decision['uncertainty_score']:.2f}). "
-                         f"{len(objectives)} approaches identified.",
-                    key_tradeoffs=[
-                        "Multiple valid interpretations",
-                        "Additional context would help",
-                        "Select the approach closest to your intent"
-                    ],
-                    next_actions=[
-                        "Select an objective",
-                        "Answer critical questions",
-                        "Or provide more context"
-                    ],
-                    details=None,
-                    glossary=None
-                ),
-                processing_metadata={
-                    "processing_time_ms": int(processing_time * 1000),
-                    "strategy": "disambiguate",
-                    "uncertainty_score": decision["uncertainty_score"],
-                    "critical_questions": critical_questions,
-                    "template_id": decision["template_id"],
-                    "session_id": session_id,
-                    "user_id": user_id
-                }
-            )
+                "user_id": user_id
+            }
+        )
         
     except Exception as e:
         import traceback
@@ -1107,7 +957,7 @@ async def generate_dynamic_graph(
     """
     Generate a completely dynamic task causal graph using LLM.
     
-    Unlike /objectives/smart which uses templates, this endpoint:
+    This endpoint generates a fully dynamic graph:
     - Generates unique graph structure for each query
     - Considers user history for personalization
     - Creates tool suggestions and validation criteria
@@ -1122,7 +972,7 @@ async def generate_dynamic_graph(
         start_time = time.time()
         
         # Step 1: Get uncertainty assessment
-        uncertainty = uncertainty_gate.assess_uncertainty(query, context)
+        uncertainty = await uncertainty_gate.assess_uncertainty(query, context)
         
         # Step 2: Get user history for personalization
         user_history = db.get_user_interaction_history(user_id, limit=10)
@@ -1290,185 +1140,14 @@ async def generate_graph_for_objective(
         raise HTTPException(status_code=500, detail=f"Failed to generate graph: {str(e)}")
 
 @app.get("/templates")
-async def list_tcg_templates(
-    domain: Optional[str] = None
-):
-    """
-    List available Task Causal Graph templates.
-    
-    Templates define workflow patterns for different domains
-    (bioinformatics, biotech, general research, etc.)
-    """
-    try:
-        templates = tcg_library.list_templates(domain)
-        return {
-            "schema_version": "2.1.0",
-            "templates": templates,
-            "count": len(templates)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list templates: {str(e)}")
+async def list_tcg_templates():
+    """Templates are deprecated in fully dynamic mode."""
+    raise HTTPException(status_code=410, detail="Templates are deprecated. Use /objectives/smart and /graph/for-objective.")
 
 @app.get("/visualize/tcg")
-async def visualize_tcg(
-    query: str,
-    context: Optional[str] = None,
-    format: str = "mermaid",  # mermaid, dot, json
-    x_user_id: Optional[str] = Header(None),
-    x_session_id: Optional[str] = Header(None)
-):
-    """
-    Generate a visualization of the Task Causal Graph for a query.
-    
-    Returns the graph in various formats:
-    - mermaid: Mermaid.js flowchart syntax (for web rendering)
-    - dot: GraphViz DOT format (for external tools)
-    - json: Structured JSON representation
-    
-    This allows users to see the causal structure of their query workflow
-    before or after execution.
-    """
-    try:
-        session_id = x_session_id or str(uuid.uuid4())
-        user_id = x_user_id or f"anonymous_{session_id[:8]}"
-        
-        # Step 1: Get uncertainty assessment
-        decision = await info_controller.process_query(query, context)
-        
-        # Step 2: Get the TCG
-        template_id = decision.get("template_id", "general_research")
-        tcg = tcg_library.instantiate_template(template_id, decision.get("inferred_slots", {}))
-        
-        if not tcg:
-            raise HTTPException(status_code=404, detail="No causal graph available for this query")
-        
-        # Step 3: Generate visualization in requested format
-        if format == "json":
-            return {
-                "schema_version": "2.1.0",
-                "query": query,
-                "template_id": template_id,
-                "template_name": decision.get("template_name", "Unknown"),
-                "uncertainty_score": decision.get("uncertainty_score", 0),
-                "strategy": decision.get("strategy", "unknown"),
-                "graph": {
-                    "nodes": [
-                        {
-                            "id": node.id,
-                            "type": node.node_type.value,
-                            "label": node.label,
-                            "description": node.description,
-                            "parameters": node.parameters
-                        }
-                        for node in tcg.nodes.values()
-                    ],
-                    "edges": [
-                        {
-                            "source": edge.source,
-                            "target": edge.target,
-                            "type": edge.edge_type.value
-                        }
-                        for edge in tcg.edges
-                    ]
-                },
-                "execution_order": tcg.to_execution_plan(),
-                "validation": tcg.validate()[0],
-                "session_id": session_id,
-                "user_id": user_id
-            }
-        
-        elif format == "mermaid":
-            # Generate Mermaid flowchart
-            lines = ["flowchart TD"]
-            
-            # Add nodes with styling based on type
-            for node_id, node in tcg.nodes.items():
-                safe_id = node_id.replace("-", "_")
-                style = ""
-                if node.node_type.value == "intent":
-                    style = ":::intent"
-                elif node.node_type.value == "decision":
-                    style = ":::decision"
-                elif node.node_type.value == "action":
-                    style = ":::action"
-                elif node.node_type.value == "output":
-                    style = ":::output"
-                
-                lines.append(f'    {safe_id}["{node.label}"]{style}')
-            
-            # Add edges
-            for edge in tcg.edges:
-                source = edge.source.replace("-", "_")
-                target = edge.target.replace("-", "_")
-                edge_label = edge.edge_type.value
-                lines.append(f'    {source} -->|{edge_label}| {target}')
-            
-            # Add class definitions for styling
-            lines.extend([
-                "    classDef intent fill:#e1f5ff,stroke:#01579b,stroke-width:2px",
-                "    classDef decision fill:#fff9c4,stroke:#f57f17,stroke-width:2px",
-                "    classDef action fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px",
-                "    classDef output fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px"
-            ])
-            
-            return {
-                "schema_version": "2.1.0",
-                "query": query,
-                "template_id": template_id,
-                "template_name": decision.get("template_name", "Unknown"),
-                "format": "mermaid",
-                "diagram": "\n".join(lines),
-                "session_id": session_id,
-                "user_id": user_id
-            }
-        
-        elif format == "dot":
-            # Generate GraphViz DOT format
-            lines = ["digraph TaskCausalGraph {"]
-            lines.append('    rankdir=TB;')
-            lines.append('    node [shape=box, style="rounded,filled", fontname="Arial"];')
-            
-            # Add nodes
-            for node_id, node in tcg.nodes.items():
-                color = "white"
-                if node.node_type.value == "intent":
-                    color = "#e1f5ff"
-                elif node.node_type.value == "decision":
-                    color = "#fff9c4"
-                elif node.node_type.value == "action":
-                    color = "#e8f5e9"
-                elif node.node_type.value == "output":
-                    color = "#f3e5f5"
-                
-                lines.append(f'    "{node_id}" [label="{node.label}", fillcolor="{color}"];')
-            
-            # Add edges
-            for edge in tcg.edges:
-                lines.append(f'    "{edge.source}" -> "{edge.target}" [label="{edge.edge_type.value}"];')
-            
-            lines.append("}")
-            
-            return {
-                "schema_version": "2.1.0",
-                "query": query,
-                "template_id": template_id,
-                "template_name": decision.get("template_name", "Unknown"),
-                "format": "dot",
-                "diagram": "\n".join(lines),
-                "session_id": session_id,
-                "user_id": user_id
-            }
-        
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported format: {format}. Use 'mermaid', 'dot', or 'json'")
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        print(f"DEBUG: Exception in visualize_tcg: {str(e)}")
-        print(f"DEBUG: Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate visualization: {str(e)}")
+async def visualize_tcg():
+    """Deprecated visualization endpoint for template-based graphs."""
+    raise HTTPException(status_code=410, detail="Template visualization is deprecated. Use /graph/dynamic or /graph/for-objective.")
 
 @app.post("/log_event")
 async def log_event(request: LogEventRequest):

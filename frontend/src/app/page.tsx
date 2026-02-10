@@ -72,6 +72,7 @@ interface QuerySession {
   id: string;
   query: string;
   timestamp: number;
+  display_time: string;
   objectives?: Objective[];
   selected_objective?: Objective;
   graph?: DynamicGraph;
@@ -294,8 +295,8 @@ function MermaidViewer({ diagram }: { diagram: string }) {
 
 export default function DynamicQueryInterface() {
   // Session
-  const [sessionId] = useState(() => `session-${Date.now()}`);
-  const [userId] = useState(() => `user-${Math.random().toString(36).substr(2, 9)}`);
+  const [sessionId, setSessionId] = useState('');
+  const [userId, setUserId] = useState('');
   
   // Query state
   const [query, setQuery] = useState('');
@@ -318,9 +319,17 @@ export default function DynamicQueryInterface() {
   const [history, setHistory] = useState<QuerySession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   
+  // Initialize session identifiers on client only
+  useEffect(() => {
+    const newSessionId = `session-${Date.now()}`;
+    const newUserId = `user-${Math.random().toString(36).substr(2, 9)}`;
+    setSessionId(newSessionId);
+    setUserId(newUserId);
+  }, []);
+
   // Step 1: Get objective clusters
   const handleGenerateObjectives = async () => {
-    if (!query.trim()) return;
+    if (!query.trim() || !sessionId || !userId) return;
     
     setIsLoading(true);
     setObjectives([]);
@@ -339,6 +348,7 @@ export default function DynamicQueryInterface() {
         id: `session-${Date.now()}`,
         query,
         timestamp: Date.now(),
+        display_time: new Date().toLocaleTimeString(),
         objectives: result.objectives
       };
       setHistory(prev => [newSession, ...prev]);
@@ -354,6 +364,7 @@ export default function DynamicQueryInterface() {
   
   // Step 2: Select objective and generate workflow
   const handleSelectObjective = async (objective: Objective) => {
+    if (!sessionId || !userId) return;
     setSelectedObjective(objective);
     setIsLoading(true);
     
@@ -378,7 +389,7 @@ export default function DynamicQueryInterface() {
   
   // Generate answer (works without Ollama - creates summary from execution plan)
   const handleGenerateAnswer = async () => {
-    if (!currentGraph) return;
+    if (!currentGraph || !sessionId || !userId) return;
     
     setIsGeneratingAnswer(true);
     
@@ -454,7 +465,7 @@ export default function DynamicQueryInterface() {
             {/* <p className="text-sm text-gray-600">Dynamic LLM-Powered Workflow Generation</p> */}
           </div>
           <div className="text-sm text-gray-500">
-            User: {userId}
+            User: {userId || '...'}
           </div>
         </div>
       </header>
@@ -580,7 +591,7 @@ export default function DynamicQueryInterface() {
                     </p>
                     <div className="flex items-center gap-2 mt-1">
                       <span className="text-xs text-gray-500">
-                        {new Date(session.timestamp).toLocaleTimeString()}
+                        {session.display_time}
                       </span>
                       {session.answer && (
                         <span className="text-xs text-green-600">✓ Answered</span>

@@ -9,7 +9,7 @@ from models import (
 )
 
 class OllamaClient:
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "qwen2.5:7b"):
+    def __init__(self, base_url: str = "http://127.0.0.1:11434", model: str = "qwen2.5:7b"):
         self.base_url = base_url
         self.model = model
     
@@ -26,24 +26,32 @@ class OllamaClient:
             }
         }
         
-        timeout = httpx.Timeout(60.0, connect=10.0)  # Reduced timeout
+        timeout = httpx.Timeout(20.0, connect=5.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(f"{self.base_url}/api/generate", json=payload)
             response.raise_for_status()
             result = response.json()
             return result.get("response", "")
     
-    async def generate_json(self, prompt: str, max_retries: int = 1) -> Dict[str, Any]:
+    async def generate_json(self, prompt: str, max_retries: int = 2) -> Dict[str, Any]:
         """Generate and parse JSON from Ollama with retry logic."""
-        initial_prompt = f"{prompt}\n\nReturn ONLY valid JSON. No markdown."
+        initial_prompt = (
+            f"{prompt}\n\n"
+            "Return ONLY valid JSON. No markdown. No trailing commas. "
+            "No comments. Use double quotes for all keys and strings."
+        )
         response_text = ""
         
         for attempt in range(max_retries + 1):
             if attempt == 0:
-                response_text = await self.generate(initial_prompt)
+                response_text = await self.generate(initial_prompt, temperature=0.2, top_p=0.8)
             else:
-                retry_prompt = f"{initial_prompt}\n\nFix JSON errors. Previous: {response_text[:200]}"
-                response_text = await self.generate(retry_prompt)
+                retry_prompt = (
+                    f"{initial_prompt}\n\n"
+                    f"Fix JSON errors. Return a single JSON object only. "
+                    f"Previous: {response_text[:200]}"
+                )
+                response_text = await self.generate(retry_prompt, temperature=0.1, top_p=0.7)
             
             try:
                 json_part = response_text.strip()
