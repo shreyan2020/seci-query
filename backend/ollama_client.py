@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any, List
 from models import Objective, AugmentResponse, EvidenceItem, FinalizeResponse
 
 class OllamaClient:
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "qwen2.5:7b"):
+    def __init__(self, base_url: str = "http://ollama:11434", model: str = "qwen2.5:7b-instruct"):
         self.base_url = base_url
         self.model = model
     

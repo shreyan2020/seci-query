@@ -2,7 +2,7 @@
 services:
   # Ollama LLM service
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.1.44
     container_name: dsm-ollama
     ports:
       - "11434:11434"
