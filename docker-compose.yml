@@ -4,6 +4,13 @@ services:
   ollama:
     image: ollama/ollama:0.1.44
     container_name: dsm-ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: ["gpu"]
+              count: all
     ports:
       - "11434:11434"
     volumes:
@@ -15,6 +22,8 @@ services:
       retries: 5
       start_period: 30s
     restart: unless-stopped
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
 
   # Backend FastAPI service
   backend:
@@ -28,17 +37,43 @@ services:
       - "8000:8000"
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_URL=http://ollama:11434
+      - DATABASE_PATH=/data/dsm.db
+      - ARTIFACT_ROOT=/data/artifacts
+      - PERSONA_ROOT=/data/personas
       - PYTHONUNBUFFERED=1
     depends_on:
       - ollama
     volumes:
-      - ./backend/data:/app/data
+      - dsm_data:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: dsm-worker
+    command: python worker_runner.py
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_URL=http://ollama:11434
+      - DATABASE_PATH=/data/dsm.db
+      - ARTIFACT_ROOT=/data/artifacts
+      - PERSONA_ROOT=/data/personas
+      - WORKER_POLL_SECONDS=2
+      - RENDER_TIMEOUT_SECONDS=180
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - backend
+      - ollama
+    volumes:
+      - dsm_data:/data
     restart: unless-stopped
 
   # Frontend Next.js service
@@ -67,6 +102,8 @@ services:
 
 volumes:
   ollama_data:
+    driver: local
+  dsm_data:
     driver: local
 
 networks:

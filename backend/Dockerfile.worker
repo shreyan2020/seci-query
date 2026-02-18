@@ -1,0 +1,35 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    wget \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG QUARTO_VERSION=1.7.34
+RUN wget -q https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-amd64.deb -O /tmp/quarto.deb \
+    && apt-get update \
+    && apt-get install -y /tmp/quarto.deb \
+    && rm -f /tmp/quarto.deb \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN mkdir -p /data/artifacts /data/personas
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD quarto --version || exit 1
+
+CMD ["python", "worker_runner.py"]

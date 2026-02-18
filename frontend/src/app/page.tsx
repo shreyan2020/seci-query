@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import Link from 'next/link';
 
 // API types - matching backend models
 interface Objective {
@@ -235,6 +236,18 @@ export default function SECIQueryExplorer() {
             </div>
 
             <div className="flex gap-2">
+              <Link
+                href="/reports"
+                className="rounded-xl border border-neutral-200 bg-white px-4 py-2 text-sm font-semibold text-neutral-900 hover:bg-neutral-50"
+              >
+                Reports
+              </Link>
+              <Link
+                href="/personas"
+                className="rounded-xl border border-neutral-200 bg-white px-4 py-2 text-sm font-semibold text-neutral-900 hover:bg-neutral-50"
+              >
+                Personas
+              </Link>
               <button
                 onClick={handleGenerateObjectives}
                 disabled={loadingObjectives || !query.trim()}

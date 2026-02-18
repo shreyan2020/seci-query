@@ -1,12 +1,13 @@
 import httpx
 import json
+import os
 from typing import Optional, Dict, Any, List
-from models import Objective, AugmentResponse, EvidenceItem, FinalizeResponse
+from models import Objective, EvidenceItem
 
 class OllamaClient:
-    def __init__(self, base_url: str = "http://ollama:11434", model: str = "qwen2.5:7b-instruct"):
-        self.base_url = base_url
-        self.model = model
+    def __init__(self, base_url: Optional[str] = None, model: Optional[str] = None):
+        self.base_url = base_url or os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+        self.model = model or os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
     
     async def generate(self, prompt: str, temperature: float = 0.7, top_p: float = 0.9) -> str:
         """Generate text from Ollama model."""
@@ -41,46 +42,62 @@ class OllamaClient:
                 response_text = await self.generate(retry_prompt)
             
             try:
-                # Try to extract JSON from response
-                json_part = response_text.strip()
-                
-                # Remove markdown code blocks
-                if "```json" in json_part:
-                    json_part = json_part.split("```json")[1].split("```")[0].strip()
-                elif "```" in json_part:
-                    json_part = json_part.split("```")[1].split("```")[0].strip()
-                
-                # Try to find JSON object/array if wrapped in text
-                if not json_part.startswith(('{', '[')):
-                    # Find first { or [
-                    start_idx = min(
-                        (json_part.find('{') if json_part.find('{') != -1 else len(json_part)),
-                        (json_part.find('[') if json_part.find('[') != -1 else len(json_part))
-                    )
-                    if start_idx < len(json_part):
-                        json_part = json_part[start_idx:]
-                
-                # Try to find end of JSON if followed by text
-                if json_part.startswith('{'):
-                    brace_count = 0
-                    for i, char in enumerate(json_part):
-                        if char == '{':
-                            brace_count += 1
-                        elif char == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                json_part = json_part[:i+1]
-                                break
-                
-                return json.loads(json_part)
+                return self._extract_json(response_text)
             except json.JSONDecodeError as e:
                 print(f"DEBUG: JSON parse error on attempt {attempt + 1}: {e}")
                 print(f"DEBUG: Response text: {response_text[:500]}...")
                 if attempt == max_retries:
-                    raise ValueError(f"Failed to parse JSON after {max_retries + 1} attempts. Last error: {e}. Response: {response_text[:200]}")
+                    raise ValueError(f"Failed to parse JSON after {max_retries + 1} attempts. Last error: {e}. Response: {response_text[:200]}") from e
                 continue
         
         raise ValueError("Unexpected error in JSON generation")
+
+    async def ollama_generate(
+        self,
+        prompt: str,
+        temperature: float = 0.2,
+        json_schema: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        schema_hint = ""
+        if json_schema is not None:
+            schema_hint = f"\nJSON Schema hint:\n{json.dumps(json_schema)}"
+        full_prompt = (
+            f"{prompt}{schema_hint}\n\n"
+            "Return ONLY valid JSON. No prose."
+        )
+        text = await self.generate(full_prompt, temperature=temperature)
+        return self._extract_json(text)
+
+    def _extract_json(self, response_text: str) -> Dict[str, Any]:
+        json_part = response_text.strip()
+        if "```json" in json_part:
+            json_part = json_part.split("```json")[1].split("```")[0].strip()
+        elif "```" in json_part:
+            json_part = json_part.split("```")[1].split("```")[0].strip()
+
+        if not json_part.startswith(("{", "[")):
+            start_idx = min(
+                (json_part.find("{") if json_part.find("{") != -1 else len(json_part)),
+                (json_part.find("[") if json_part.find("[") != -1 else len(json_part)),
+            )
+            if start_idx < len(json_part):
+                json_part = json_part[start_idx:]
+
+        if json_part.startswith("{"):
+            brace_count = 0
+            for i, char in enumerate(json_part):
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        json_part = json_part[: i + 1]
+                        break
+
+        parsed = json.loads(json_part)
+        if not isinstance(parsed, dict):
+            raise json.JSONDecodeError("Expected JSON object", json_part, 0)
+        return parsed
     
     def get_objectives_prompt(self, query: str, context: Optional[str] = None, k: int = 5) -> str:
         """Generate the prompt for objective generation."""
@@ -158,7 +175,7 @@ Return ONLY valid JSON. No markdown, no code blocks."""
         evidence_text = ""
         if evidence_items:
             evidence_snippets = [item.snippet for item in evidence_items]
-            evidence_text = f"\nEvidence to incorporate:\n" + "\n".join(f"- {snippet}" for snippet in evidence_snippets)
+            evidence_text = "\nEvidence to incorporate:\n" + "\n".join(f"- {snippet}" for snippet in evidence_snippets)
         
         facet_answers_text = "\n".join(f"- {question}: {answer}" for question, answer in answers.items())
         

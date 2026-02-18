@@ -9,13 +9,17 @@ A proof-of-concept system for exploring underspecified queries using the SECI fr
 - **Context Augmentation**: Incorporate external evidence from user-provided context
 - **Final Answer Synthesis**: Generate comprehensive answers based on selected objectives and user preferences
 - **Learning System**: Store and reuse prior knowledge for similar queries
+- **QMD Reports**: Create/edit Quarto Markdown reports, enqueue async HTML/PDF renders, and preview/download outputs
+- **Persona Extraction**: Build structured personas from interview transcripts via Ollama
+- **Persona-aware Orchestration**: Inject persona summary into objective/augment/finalize prompt assembly
 
 ## Architecture
 
 - **Frontend**: Next.js with React and Tailwind CSS
 - **Backend**: FastAPI with Python
+- **Render Worker**: Python polling worker executing `quarto render` asynchronously
 - **AI Runtime**: Ollama with qwen2.5:7b-instruct model
-- **Storage**: SQLite for logging and prior knowledge
+- **Storage**: SQLite for logging, reports, jobs, personas, interviews + artifact files under `/data`
 
 ## Quick Start
 
@@ -87,6 +91,25 @@ The system will generate objectives like:
 - `POST /log_event` - Log events for learning
 - `GET /health` - Health check
 
+### QMD reports
+
+- `POST /api/reports` - Create report
+- `GET /api/reports` - List reports
+- `GET /api/reports/{id}` - Report metadata/status
+- `GET /api/reports/{id}/qmd` - Read QMD
+- `PUT /api/reports/{id}/qmd` - Update QMD
+- `POST /api/reports/{id}/render` - Enqueue render job
+- `GET /api/reports/{id}/output/html` - Serve rendered HTML
+- `GET /api/reports/{id}/output/pdf` - Serve rendered PDF
+- `GET /api/reports/{id}/logs` - Render log tail
+
+### Personas/interviews
+
+- `POST /api/interviews` - Create interview transcript record
+- `POST /api/personas/from-interviews` - Create/update persona from interview transcripts
+- `GET /api/personas` - List personas (optional `scope_id`)
+- `GET /api/personas/{id}` - Get persona detail
+
 ## Development
 
 ### Project Structure
@@ -110,7 +133,7 @@ The system will generate objectives like:
 docker-compose up
 ```
 
-Note: Ollama runs separately for better performance.
+This starts `frontend`, `backend`, `worker`, and `ollama`. The backend and worker share `/data` volume for DB + artifacts.
 
 ## Acceptance Criteria
 
