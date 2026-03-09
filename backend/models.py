@@ -56,6 +56,46 @@ class FinalizeResponse(BaseModel):
     assumptions: List[str]
     next_questions: List[str]
 
+
+class PlanStep(BaseModel):
+    id: str
+    title: str
+    description: str
+    why_this_step: str
+    objective_link: str
+    persona_link: str
+    evidence_facts: List[str] = Field(default_factory=list)
+    examples: List[str] = Field(default_factory=list)
+    dependencies: List[str] = Field(default_factory=list)
+    expected_outcome: str
+    confidence: float = 0.5
+
+
+class PlanRisk(BaseModel):
+    risk: str
+    mitigation: str
+
+
+class AgenticPlan(BaseModel):
+    plan_title: str
+    strategy_summary: str
+    success_criteria: List[str] = Field(default_factory=list)
+    assumptions: List[str] = Field(default_factory=list)
+    risks: List[PlanRisk] = Field(default_factory=list)
+    steps: List[PlanStep] = Field(default_factory=list)
+
+
+class GeneratePlanRequest(BaseModel):
+    query: str
+    objective: Objective
+    persona_id: int
+    facet_answers: Dict[str, str] = Field(default_factory=dict)
+    context_blob: Optional[str] = None
+
+
+class GeneratePlanResponse(BaseModel):
+    plan: AgenticPlan
+
 class LogEventRequest(BaseModel):
     event_type: str
     payload: Dict[str, Any]
@@ -225,6 +265,32 @@ class CreateInterviewResponse(BaseModel):
     interview_id: int
 
 
+class ImportInterviewTextsRequest(BaseModel):
+    scope: str
+    folder: Optional[str] = None
+    recursive: bool = True
+
+
+class ImportInterviewTextsResponse(BaseModel):
+    imported_count: int
+    imported_files: List[str]
+    skipped_count: int = 0
+    skipped_files: List[str] = Field(default_factory=list)
+
+
+class InterviewResponse(BaseModel):
+    id: int
+    scope: str
+    transcript_path: Optional[str] = None
+    transcript_text: Optional[str] = None
+    created_at: str
+    metadata_json: Dict[str, Any] = Field(default_factory=dict)
+
+
+class InterviewListResponse(BaseModel):
+    interviews: List[InterviewResponse]
+
+
 class EvidenceReference(BaseModel):
     claim: str
     interview_id: int
@@ -277,7 +343,7 @@ class PersonaPayload(BaseModel):
 class PersonaFromInterviewsRequest(BaseModel):
     scope_id: str
     interview_ids: Optional[List[int]] = None
-    persona_name: str
+    persona_name: Optional[str] = None
     mode: Literal["create", "update"] = "create"
     persona_id: Optional[int] = None
 
@@ -286,10 +352,27 @@ class PersonaFromInterviewsResponse(BaseModel):
     persona_id: int
 
 
+class ExtractAllPersonasRequest(BaseModel):
+    scope_id: str
+    extract_new_only: bool = True
+
+
+class ExtractAllPersonasResponse(BaseModel):
+    extracted: List[Dict[str, Any]]
+    skipped: List[Dict[str, Any]]
+
+
+class UpdatePersonaRequest(BaseModel):
+    name: Optional[str] = None
+    persona_json: Dict[str, Any]
+    mode: Literal["augment", "replace"] = "augment"
+
+
 class PersonaResponse(BaseModel):
     id: int
     name: str
     scope: str
+    identity_key: Optional[str] = None
     source: str
     created_at: str
     updated_at: str

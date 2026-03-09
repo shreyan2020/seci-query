@@ -6,13 +6,19 @@ from models import Objective, EvidenceItem
 
 class OllamaClient:
     def __init__(self, base_url: Optional[str] = None, model: Optional[str] = None):
-        self.base_url = base_url or os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-        self.model = model or os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+        self.base_url = base_url or os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.model = model or os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
     
-    async def generate(self, prompt: str, temperature: float = 0.7, top_p: float = 0.9) -> str:
+    async def generate(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        model: Optional[str] = None,
+    ) -> str:
         """Generate text from Ollama model."""
         payload = {
-            "model": self.model,
+            "model": model or self.model,
             "prompt": prompt,
             "stream": False,
             "options": {
@@ -25,21 +31,46 @@ class OllamaClient:
         timeout = httpx.Timeout(300.0, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(f"{self.base_url}/api/generate", json=payload)
+            active_model = model or self.model
+            if response.status_code == 404 and active_model.endswith("-instruct"):
+                fallback_model = active_model.replace("-instruct", "")
+                payload["model"] = fallback_model
+                response = await client.post(f"{self.base_url}/api/generate", json=payload)
+                if response.is_success:
+                    if model is None:
+                        self.model = fallback_model
             response.raise_for_status()
             result = response.json()
             return result.get("response", "")
     
-    async def generate_json(self, prompt: str, max_retries: int = 1) -> Dict[str, Any]:
+    async def generate_json(
+        self,
+        prompt: str,
+        max_retries: int = 1,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Generate and parse JSON from Ollama with retry logic."""
         initial_prompt = f"{prompt}\n\nIMPORTANT: Return ONLY valid JSON. No markdown, no code blocks, no explanation."
         response_text = ""
         
         for attempt in range(max_retries + 1):
             if attempt == 0:
-                response_text = await self.generate(initial_prompt)
+                response_text = await self.generate(
+                    initial_prompt,
+                    temperature=temperature,
+                    top_p=top_p,
+                    model=model,
+                )
             else:
                 retry_prompt = f"{initial_prompt}\n\nYour previous output was invalid JSON. Please fix it and return ONLY valid JSON.\n\nPrevious invalid output:\n{response_text}"
-                response_text = await self.generate(retry_prompt)
+                response_text = await self.generate(
+                    retry_prompt,
+                    temperature=temperature,
+                    top_p=top_p,
+                    model=model,
+                )
             
             try:
                 return self._extract_json(response_text)
@@ -200,6 +231,72 @@ Return your response as valid JSON:
     "final_answer": "comprehensive answer addressing the query",
     "assumptions": ["assumption1", "assumption2"],
     "next_questions": ["followup1", "followup2"]
+}}
+
+Return ONLY valid JSON. No markdown, no code blocks."""
+
+    def get_agentic_plan_prompt(
+        self,
+        query: str,
+        objective: Objective,
+        persona_summary: str,
+        facet_answers: Dict[str, str],
+        context_blob: Optional[str] = None,
+    ) -> str:
+        facet_block = "\n".join(f"- {k}: {v}" for k, v in facet_answers.items()) if facet_answers else "- none"
+        context_block = context_blob.strip() if context_blob else "none"
+
+        return f"""You are an elite planning agent. Build an actionable, evidence-aware execution plan.
+
+User query: "{query}"
+Selected objective cluster:
+- id: {objective.id}
+- title: {objective.title}
+- subtitle: {objective.subtitle}
+- definition: {objective.definition}
+- signals: {", ".join(objective.signals)}
+
+Persona summary:
+{persona_summary}
+
+Facet answers:
+{facet_block}
+
+Additional context:
+{context_block}
+
+Planning requirements:
+1) Produce a concrete multi-step plan (5-9 steps) that serves the selected objective.
+2) Explain WHY each step was chosen and how it maps to objective + persona.
+3) Include examples or factual anchors per step.
+4) Include dependencies, expected outcomes, and confidence (0..1) for each step.
+5) Include risks + mitigations and measurable success criteria.
+6) Keep text concise but specific.
+
+Return ONLY valid JSON using this exact shape:
+{{
+  "plan": {{
+    "plan_title": "string",
+    "strategy_summary": "string",
+    "success_criteria": ["string"],
+    "assumptions": ["string"],
+    "risks": [{{"risk": "string", "mitigation": "string"}}],
+    "steps": [
+      {{
+        "id": "step_1",
+        "title": "string",
+        "description": "string",
+        "why_this_step": "string",
+        "objective_link": "string",
+        "persona_link": "string",
+        "evidence_facts": ["string"],
+        "examples": ["string"],
+        "dependencies": ["step_1"],
+        "expected_outcome": "string",
+        "confidence": 0.75
+      }}
+    ]
+  }}
 }}
 
 Return ONLY valid JSON. No markdown, no code blocks."""

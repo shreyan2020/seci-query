@@ -1,0 +1,59 @@
+{
+  "persona_id": "PERSONA_FOOD_001",
+  "scope_id": "default",
+  "role": "unknown",
+  "domain_expertise": {
+    "biotech": "unknown",
+    "stats": "unknown",
+    "coding": "unknown"
+  },
+  "goals": [
+    "Increase transparency of AI systems",
+    "Improve predictability of AI systems",
+    "Align AI with human reasoning processes",
+    "Augment human cognition rather than replace it",
+    "Help users detect and correct errors"
+  ],
+  "constraints": {
+    "time_sensitivity": "unknown",
+    "compliance_posture": "unknown",
+    "risk_tolerance": "unknown"
+  },
+  "preferences": {
+    "output_format": "unknown",
+    "citation_need": "unknown",
+    "verbosity": "unknown"
+  },
+  "decision_style": "exploratory",
+  "trust_profile": {
+    "default_reliance": "low",
+    "verification_habits": [
+      "Verify the correctness of AI systems' outputs by detecting and correcting errors"
+    ]
+  },
+  "taboo_or_redlines": [],
+  "key_quotes": [
+    {
+      "quote": "The goal should be to augment human cognition, not replace it.",
+      "interview_id": 1
+    },
+    {
+      "quote": "Helping users detect and correct errors is more valuable than simply providing answers.",
+      "interview_id": 1
+    }
+  ],
+  "evidence": {
+    "support": [
+      {
+        "claim": "Wants AI systems to be transparent, predictable, and aligned with human reasoning processes",
+        "interview_id": 1,
+        "span_hint": "I want AI systems to become more transparent, more predictable, and better aligned with human reasoning processes. The goal should be to augment human cognition, not replace it."
+      },
+      {
+        "claim": "Values the ability of users to detect and correct errors",
+        "interview_id": 1,
+        "span_hint": "One important principle is that systems should make it easier for users to understand when they might be wrong. Helping users detect and correct errors is more valuable than simply providing answers."
+      }
+    ]
+  }
+}

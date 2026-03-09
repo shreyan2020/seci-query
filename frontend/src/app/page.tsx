@@ -39,36 +39,99 @@ interface FinalizeResponse {
   next_questions: string[];
 }
 
+interface PlanRisk {
+  risk: string;
+  mitigation: string;
+}
+
+interface PlanStep {
+  id: string;
+  title: string;
+  description: string;
+  why_this_step: string;
+  objective_link: string;
+  persona_link: string;
+  evidence_facts: string[];
+  examples: string[];
+  dependencies: string[];
+  expected_outcome: string;
+  confidence: number;
+}
+
+interface AgenticPlan {
+  plan_title: string;
+  strategy_summary: string;
+  success_criteria: string[];
+  assumptions: string[];
+  risks: PlanRisk[];
+  steps: PlanStep[];
+}
+
+interface GeneratePlanResponse {
+  plan: AgenticPlan;
+}
+
+interface PersonaItem {
+  id: number;
+  name: string;
+  scope: string;
+}
+
 // API client
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-async function generateObjectives(query: string, context?: string, k: number = 5): Promise<ObjectivesResponse> {
+async function generateObjectives(query: string, context?: string, k: number = 5, personaId?: number): Promise<ObjectivesResponse> {
   const response = await fetch(`${API_BASE}/objectives`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, context, k })
+    body: JSON.stringify({ query, context, k, persona_id: personaId })
   });
   if (!response.ok) throw new Error('Failed to generate objectives');
   return response.json();
 }
 
-async function augmentWithContext(query: string, objectiveId: string, objectiveDefinition: string, contextBlob: string): Promise<AugmentResponse> {
+async function augmentWithContext(query: string, objectiveId: string, objectiveDefinition: string, contextBlob: string, personaId?: number): Promise<AugmentResponse> {
   const response = await fetch(`${API_BASE}/augment`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, objective_id: objectiveId, objective_definition: objectiveDefinition, context_blob: contextBlob })
+    body: JSON.stringify({ query, objective_id: objectiveId, objective_definition: objectiveDefinition, context_blob: contextBlob, persona_id: personaId })
   });
   if (!response.ok) throw new Error('Failed to augment with context');
   return response.json();
 }
 
-async function finalizeAnswer(query: string, objective: Objective, answers: Record<string, string>, contextBlob?: string, evidenceItems?: EvidenceItem[]): Promise<FinalizeResponse> {
+async function finalizeAnswer(query: string, objective: Objective, answers: Record<string, string>, contextBlob?: string, evidenceItems?: EvidenceItem[], personaId?: number): Promise<FinalizeResponse> {
   const response = await fetch(`${API_BASE}/finalize`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, objective, answers, context_blob: contextBlob, evidence_items: evidenceItems })
+    body: JSON.stringify({ query, objective, answers, context_blob: contextBlob, evidence_items: evidenceItems, persona_id: personaId })
   });
   if (!response.ok) throw new Error('Failed to finalize answer');
+  return response.json();
+}
+
+async function generateAgenticPlan(
+  query: string,
+  objective: Objective,
+  personaId: number,
+  facetAnswers: Record<string, string>,
+  contextBlob?: string
+): Promise<GeneratePlanResponse> {
+  const response = await fetch(`${API_BASE}/api/plans/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query,
+      objective,
+      persona_id: personaId,
+      facet_answers: facetAnswers,
+      context_blob: contextBlob,
+    }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to generate agentic plan');
+  }
   return response.json();
 }
 
@@ -113,17 +176,22 @@ export default function SECIQueryExplorer() {
   const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>([]);
   const [augmentedAnswer, setAugmentedAnswer] = useState<string>('');
   const [finalAnswer, setFinalAnswer] = useState<FinalizeResponse | null>(null);
+  const [agenticPlan, setAgenticPlan] = useState<AgenticPlan | null>(null);
+  const [selectedPlanStepId, setSelectedPlanStepId] = useState<string>('');
+  const [personas, setPersonas] = useState<PersonaItem[]>([]);
+  const [personaId, setPersonaId] = useState<number | ''>('');
   
   // Loading states
   const [loadingObjectives, setLoadingObjectives] = useState(false);
   const [loadingAugment, setLoadingAugment] = useState(false);
   const [loadingFinalize, setLoadingFinalize] = useState(false);
+  const [loadingPlan, setLoadingPlan] = useState(false);
 
   // Generate objectives
   const handleGenerateObjectives = async () => {
     setLoadingObjectives(true);
     try {
-      const response = await generateObjectives(query, contextBlob || undefined);
+      const response = await generateObjectives(query, contextBlob || undefined, 5, personaId === '' ? undefined : Number(personaId));
       setObjectives(response.objectives);
       setGlobalQuestions(response.global_questions);
       setSelectedObjective(null);
@@ -131,6 +199,8 @@ export default function SECIQueryExplorer() {
       setEvidenceItems([]);
       setAugmentedAnswer('');
       setFinalAnswer(null);
+      setAgenticPlan(null);
+      setSelectedPlanStepId('');
     } catch (error) {
       console.error('Error generating objectives:', error);
       alert('Failed to generate objectives. Please check if the backend is running.');
@@ -146,6 +216,46 @@ export default function SECIQueryExplorer() {
     setEvidenceItems([]);
     setAugmentedAnswer('');
     setFinalAnswer(null);
+    setAgenticPlan(null);
+    setSelectedPlanStepId('');
+  };
+
+  const handleGeneratePlan = async () => {
+    if (!selectedObjective) return;
+    if (personaId === '') {
+      alert('Select a persona before generating a plan.');
+      return;
+    }
+
+    setLoadingPlan(true);
+    try {
+      const response = await generateAgenticPlan(
+        query,
+        selectedObjective,
+        Number(personaId),
+        facetAnswers,
+        contextBlob || undefined
+      );
+      setAgenticPlan(response.plan);
+      if (response.plan.steps.length > 0) {
+        setSelectedPlanStepId(response.plan.steps[0].id);
+      }
+    } catch (error) {
+      console.error('Error generating plan:', error);
+      alert(error instanceof Error ? error.message : 'Failed to generate plan');
+    } finally {
+      setLoadingPlan(false);
+    }
+  };
+
+  const updatePlanStep = (stepId: string, patch: Partial<PlanStep>) => {
+    setAgenticPlan((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        steps: prev.steps.map((s) => (s.id === stepId ? { ...s, ...patch } : s)),
+      };
+    });
   };
 
   // Augment with context
@@ -154,7 +264,13 @@ export default function SECIQueryExplorer() {
     
     setLoadingAugment(true);
     try {
-      const response = await augmentWithContext(query, selectedObjective.id, selectedObjective.definition, contextBlob);
+      const response = await augmentWithContext(
+        query,
+        selectedObjective.id,
+        selectedObjective.definition,
+        contextBlob,
+        personaId === '' ? undefined : Number(personaId)
+      );
       setEvidenceItems(response.evidence_items);
       setAugmentedAnswer(response.augmented_answer || '');
     } catch (error) {
@@ -176,7 +292,8 @@ export default function SECIQueryExplorer() {
         selectedObjective, 
         facetAnswers, 
         contextBlob || undefined, 
-        evidenceItems.length > 0 ? evidenceItems : undefined
+        evidenceItems.length > 0 ? evidenceItems : undefined,
+        personaId === '' ? undefined : Number(personaId)
       );
       setFinalAnswer(response);
     } catch (error) {
@@ -197,7 +314,19 @@ export default function SECIQueryExplorer() {
     setAugmentedAnswer('');
     setFinalAnswer(null);
     setContextBlob('');
+    setAgenticPlan(null);
+    setSelectedPlanStepId('');
   };
+
+  React.useEffect(() => {
+    const load = async () => {
+      const res = await fetch(`${API_BASE}/api/personas`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      setPersonas(data.personas || []);
+    };
+    load();
+  }, []);
 
   // Calculate objective stats (like original topicStats)
   const objectiveStats = objectives.reduce((acc, obj) => {
@@ -219,6 +348,8 @@ export default function SECIQueryExplorer() {
     `Common signals: ${selectedObjective.signals.slice(0, 5).join(', ')}`,
     `Facet questions: ${selectedObjective.facet_questions.length}`,
   ].join('\n') : null;
+
+  const selectedPlanStep = agenticPlan?.steps.find((step) => step.id === selectedPlanStepId) || null;
 
   return (
     <div className="min-h-screen bg-neutral-50 p-6">
@@ -297,6 +428,17 @@ export default function SECIQueryExplorer() {
 
           {/* Context blob input */}
           <div className="mt-3">
+            <label className="mb-1 block text-xs font-medium text-neutral-700">Persona (optional)</label>
+            <select
+              value={personaId}
+              onChange={(e) => setPersonaId(e.target.value === '' ? '' : Number(e.target.value))}
+              className="mb-3 w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none ring-0 focus:border-neutral-300"
+            >
+              <option value="">None</option>
+              {personas.map((p) => (
+                <option key={p.id} value={p.id}>{p.name} ({p.scope})</option>
+              ))}
+            </select>
             <label className="mb-1 block text-xs font-medium text-neutral-700">Context evidence (optional)</label>
             <textarea
               value={contextBlob}
@@ -429,6 +571,189 @@ export default function SECIQueryExplorer() {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {/* Agentic plan */}
+              {selectedObjective && (
+                <div className="mt-4 rounded-2xl border border-sky-200 bg-gradient-to-br from-sky-50 via-white to-cyan-50 p-4">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">Agentic Plan Visualizer</div>
+                      <div className="text-xs text-slate-600">
+                        Build an objective-aligned plan with persona-specific rationale, facts, and editable steps.
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleGeneratePlan}
+                      disabled={loadingPlan || personaId === ''}
+                      className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {loadingPlan ? 'Planning...' : 'Generate Plan'}
+                    </button>
+                  </div>
+
+                  {personaId === '' && (
+                    <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      Select a persona to generate a plan tailored to user behavior and decision style.
+                    </div>
+                  )}
+
+                  {agenticPlan && (
+                    <div className="mt-4 space-y-4">
+                      <div className="rounded-xl border border-slate-200 bg-white p-3">
+                        <div className="text-sm font-semibold text-slate-900">{agenticPlan.plan_title}</div>
+                        <div className="mt-1 text-xs text-slate-700">{agenticPlan.strategy_summary}</div>
+                        {agenticPlan.success_criteria.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {agenticPlan.success_criteria.map((criterion, idx) => (
+                              <span key={`${criterion}-${idx}`} className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-800">
+                                {criterion}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="grid gap-3 lg:grid-cols-2">
+                        <div className="space-y-2">
+                          {agenticPlan.steps.map((step, index) => {
+                            const active = selectedPlanStepId === step.id;
+                            return (
+                              <button
+                                key={step.id}
+                                onClick={() => setSelectedPlanStepId(step.id)}
+                                className={classNames(
+                                  'w-full rounded-xl border p-3 text-left transition',
+                                  active
+                                    ? 'border-sky-400 bg-sky-50 shadow-sm'
+                                    : 'border-slate-200 bg-white hover:bg-slate-50'
+                                )}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div>
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-700">Step {index + 1}</div>
+                                    <div className="text-sm font-semibold text-slate-900">{step.title}</div>
+                                  </div>
+                                  <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
+                                    {Math.round((step.confidence || 0) * 100)}%
+                                  </span>
+                                </div>
+                                <div className="mt-1 line-clamp-2 text-xs text-slate-700">{step.description}</div>
+                                {step.dependencies.length > 0 && (
+                                  <div className="mt-2 flex flex-wrap gap-1">
+                                    {step.dependencies.map((dep) => (
+                                      <span key={dep} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-700">
+                                        depends on {dep}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        <div className="rounded-xl border border-slate-200 bg-white p-3">
+                          {!selectedPlanStep ? (
+                            <div className="text-xs text-slate-600">Pick a step to inspect and edit rationale.</div>
+                          ) : (
+                            <div className="space-y-2">
+                              <input
+                                value={selectedPlanStep.title}
+                                onChange={(e) => updatePlanStep(selectedPlanStep.id, { title: e.target.value })}
+                                className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm font-semibold text-slate-900"
+                              />
+                              <textarea
+                                value={selectedPlanStep.description}
+                                onChange={(e) => updatePlanStep(selectedPlanStep.id, { description: e.target.value })}
+                                rows={3}
+                                className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
+                              />
+                              <div className="rounded-lg border border-violet-200 bg-violet-50 p-2">
+                                <div className="text-[11px] font-semibold uppercase tracking-wide text-violet-800">Why this step was chosen</div>
+                                <textarea
+                                  value={selectedPlanStep.why_this_step}
+                                  onChange={(e) => updatePlanStep(selectedPlanStep.id, { why_this_step: e.target.value })}
+                                  rows={3}
+                                  className="mt-1 w-full rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs text-slate-800"
+                                />
+                              </div>
+                              <div className="grid gap-2 md:grid-cols-2">
+                                <div>
+                                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Objective link</div>
+                                  <textarea
+                                    value={selectedPlanStep.objective_link}
+                                    onChange={(e) => updatePlanStep(selectedPlanStep.id, { objective_link: e.target.value })}
+                                    rows={2}
+                                    className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
+                                  />
+                                </div>
+                                <div>
+                                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Persona link</div>
+                                  <textarea
+                                    value={selectedPlanStep.persona_link}
+                                    onChange={(e) => updatePlanStep(selectedPlanStep.id, { persona_link: e.target.value })}
+                                    rows={2}
+                                    className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
+                                  />
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Evidence / facts (one per line)</div>
+                                <textarea
+                                  value={selectedPlanStep.evidence_facts.join('\n')}
+                                  onChange={(e) =>
+                                    updatePlanStep(selectedPlanStep.id, {
+                                      evidence_facts: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean),
+                                    })
+                                  }
+                                  rows={3}
+                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
+                                />
+                              </div>
+                              <div>
+                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Examples (one per line)</div>
+                                <textarea
+                                  value={selectedPlanStep.examples.join('\n')}
+                                  onChange={(e) =>
+                                    updatePlanStep(selectedPlanStep.id, {
+                                      examples: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean),
+                                    })
+                                  }
+                                  rows={3}
+                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
+                                />
+                              </div>
+                              <div>
+                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Expected outcome</div>
+                                <textarea
+                                  value={selectedPlanStep.expected_outcome}
+                                  onChange={(e) => updatePlanStep(selectedPlanStep.id, { expected_outcome: e.target.value })}
+                                  rows={2}
+                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
+                                />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {agenticPlan.risks.length > 0 && (
+                        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-rose-800">Risk radar</div>
+                          <div className="mt-2 space-y-2">
+                            {agenticPlan.risks.map((r, idx) => (
+                              <div key={`${r.risk}-${idx}`} className="rounded-lg border border-rose-200 bg-white p-2">
+                                <div className="text-xs font-semibold text-rose-900">{r.risk}</div>
+                                <div className="text-xs text-slate-700">Mitigation: {r.mitigation}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 

@@ -1,9 +1,11 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import os
 from pathlib import Path
+import json
+import re
 
 from models import (
     ObjectivesRequest, ObjectivesResponse, Objective,
@@ -19,8 +21,14 @@ from models import (
     CreateReportRequest, CreateReportResponse, ReportMetadataResponse,
     UpdateReportQmdRequest, RenderReportRequest, RenderReportResponse, ReportLogsResponse,
     CreateInterviewRequest, CreateInterviewResponse,
+    ImportInterviewTextsRequest, ImportInterviewTextsResponse,
+    InterviewResponse, InterviewListResponse,
     PersonaFromInterviewsRequest, PersonaFromInterviewsResponse,
-    PersonaResponse, PersonaListResponse
+    ExtractAllPersonasRequest, ExtractAllPersonasResponse,
+    GeneratePlanRequest, GeneratePlanResponse, AgenticPlan,
+    UpdatePersonaRequest,
+    PersonaResponse, PersonaListResponse,
+    PersonaPayload,
 )
 from ollama_client import ollama
 from database import db
@@ -32,7 +40,12 @@ from report_service import (
     manifest_cache_hit,
     read_log_tail,
 )
-from persona_extractor import extract_persona_from_interviews, save_persona_snapshot
+from persona_extractor import (
+    extract_persona_from_interviews,
+    save_persona_snapshot,
+    merge_persona_payloads,
+    build_persona_summary,
+)
 from context_fs import (
     list_context_dir,
     read_context_file,
@@ -110,6 +123,7 @@ def _persona_row_to_response(row: dict) -> PersonaResponse:
         id=row["id"],
         name=row["name"],
         scope=row["scope"],
+        identity_key=row.get("identity_key"),
         source=row["source"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -117,6 +131,185 @@ def _persona_row_to_response(row: dict) -> PersonaResponse:
         last_summary=row["last_summary"],
         persona_json=row["persona_json"],
     )
+
+
+def _interview_root() -> Path:
+    return Path(os.getenv("INTERVIEW_TEXT_ROOT", "data/interviews")).resolve()
+
+
+def _resolve_interview_folder(folder: Optional[str]) -> Path:
+    root = _interview_root()
+    root.mkdir(parents=True, exist_ok=True)
+    if not folder:
+        return root
+    cleaned = folder.replace("\\", "/").strip().lstrip("/")
+    candidate = (root / cleaned).resolve()
+    if root not in candidate.parents and candidate != root:
+        raise HTTPException(status_code=400, detail="Invalid folder path")
+    return candidate
+
+
+def _interview_row_to_response(row: dict) -> InterviewResponse:
+    return InterviewResponse(
+        id=row["id"],
+        scope=row["scope"],
+        transcript_path=row.get("transcript_path"),
+        transcript_text=row.get("transcript_text"),
+        created_at=row["created_at"],
+        metadata_json=row.get("metadata_json") or {},
+    )
+
+
+def _slugify(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip().lower())
+    cleaned = re.sub(r"-+", "-", cleaned).strip("-")
+    return cleaned or "item"
+
+
+def _canonical_identity(value: str) -> str:
+    lowered = (value or "").strip().lower()
+    return re.sub(r"[^a-z0-9]+", "", lowered)
+
+
+def _extract_participant_id(text: str) -> Optional[str]:
+    if not text:
+        return None
+    match = re.search(r"^\s*Participant\s*ID\s*:\s*(.+?)\s*$", text, flags=re.IGNORECASE | re.MULTILINE)
+    if not match:
+        return None
+    participant_id = match.group(1).strip()
+    return participant_id or None
+
+
+def _extract_participant_id_from_interviews(interviews: list[dict]) -> Optional[str]:
+    for interview in interviews:
+        meta = interview.get("metadata_json") or {}
+        pid = meta.get("participant_id")
+        if isinstance(pid, str) and pid.strip():
+            return pid.strip()
+        if interview.get("transcript_path"):
+            path = Path(interview["transcript_path"])
+            if path.exists() and path.is_file():
+                text = path.read_text(encoding="utf-8", errors="replace")
+                pid = _extract_participant_id(text)
+                if pid:
+                    return pid
+        if interview.get("transcript_text"):
+            pid = _extract_participant_id(interview["transcript_text"])
+            if pid:
+                return pid
+    return None
+
+
+def _persona_identity_key(scope: str, persona_name: str, interviews: list[dict]) -> str:
+    participant_ids = set()
+    for interview in interviews:
+        meta = interview.get("metadata_json") or {}
+        pid = meta.get("participant_id")
+        if isinstance(pid, str) and pid.strip():
+            participant_ids.add(_canonical_identity(pid))
+            continue
+        if interview.get("transcript_path"):
+            path = Path(interview["transcript_path"])
+            if path.exists() and path.is_file():
+                text = path.read_text(encoding="utf-8", errors="replace")
+                pid = _extract_participant_id(text)
+                if pid:
+                    participant_ids.add(_canonical_identity(pid))
+        if interview.get("transcript_text"):
+            pid = _extract_participant_id(interview["transcript_text"])
+            if pid:
+                participant_ids.add(_canonical_identity(pid))
+
+    if len(participant_ids) == 1:
+        return f"participant:{next(iter(participant_ids))}"
+
+    return f"name:{_canonical_identity(scope)}:{_canonical_identity(persona_name)}"
+
+
+def _find_persona_by_identity(scope: str, name: str, identity_key: Optional[str] = None) -> Optional[dict]:
+    if identity_key:
+        row = db.get_persona_by_scope_identity(scope, identity_key)
+        if row:
+            return row
+
+    target_scope = _canonical_identity(scope)
+    target_name = _canonical_identity(name)
+    candidates = db.list_personas(scope=scope)
+    for row in candidates:
+        if _canonical_identity(row.get("scope", "")) == target_scope and _canonical_identity(row.get("name", "")) == target_name:
+            return row
+    if scope.strip() != scope:
+        # defensive retry using trimmed scope in case caller provided padded scope
+        candidates = db.list_personas(scope=scope.strip())
+        for row in candidates:
+            if _canonical_identity(row.get("scope", "")) == target_scope and _canonical_identity(row.get("name", "")) == target_name:
+                return row
+    return None
+
+
+def _write_persona_context(
+    scope: str,
+    name: str,
+    persona_payload: dict,
+    summary: str,
+    identity_key: Optional[str] = None,
+):
+    scope_slug = _slugify(scope)
+    name_slug = _slugify(name)
+    key_slug = _slugify(identity_key or "")
+    suffix = f"__{key_slug}" if key_slug else ""
+    base = f"persona/capabilities/{scope_slug}__{name_slug}{suffix}"
+    write_context_file(f"{base}.json", json.dumps(persona_payload, indent=2), overwrite=True)
+    write_context_file(
+        f"persona/interaction_style/{scope_slug}__{name_slug}{suffix}.md",
+        f"# Persona Summary\n\nScope: {scope}\nName: {name}\n\n{summary}\n",
+        overwrite=True,
+    )
+
+
+def _write_interview_context(scope: str, transcript_path: str, transcript_text: Optional[str] = None):
+    scope_slug = _slugify(scope)
+    file_name = Path(transcript_path).name if transcript_path else "interview.txt"
+    dest = f"seci/S_socialization/shadowing_transcripts/{scope_slug}/{file_name}"
+    text = transcript_text
+    if text is None and transcript_path:
+        path = Path(transcript_path)
+        if path.exists() and path.is_file():
+            text = path.read_text(encoding="utf-8", errors="replace")
+    write_context_file(dest, text or "", overwrite=True)
+
+
+def _consolidate_persona_duplicates(scope: str, name: str, identity_key: str, canonical_id: int) -> Optional[dict]:
+    matches = db.list_personas_by_scope_identity(scope, identity_key)
+    if len(matches) <= 1:
+        matches = db.list_personas_by_scope_name_normalized(scope, name)
+    if len(matches) <= 1:
+        return db.get_persona(canonical_id)
+
+    canonical = db.get_persona(canonical_id)
+    if not canonical:
+        return None
+
+    merged_payload = canonical.get("persona_json") or {}
+    for row in matches:
+        row_id = int(row["id"])
+        if row_id == canonical_id:
+            continue
+        merged_payload = merge_persona_payloads(merged_payload, row.get("persona_json") or {})
+        db.delete_persona(row_id)
+
+    merged_summary = build_persona_summary(PersonaPayload.model_validate(merged_payload))
+    db.update_persona(
+        canonical_id,
+        persona_json=merged_payload,
+        last_summary=merged_summary,
+        name=name,
+        identity_key=identity_key,
+    )
+    _write_persona_context(scope, name, merged_payload, merged_summary, identity_key)
+    save_persona_snapshot(canonical_id, merged_payload, [])
+    return db.get_persona(canonical_id)
 
 @app.post("/objectives", response_model=ObjectivesResponse)
 async def generate_objectives(request: ObjectivesRequest):
@@ -248,6 +441,67 @@ async def finalize_answer(request: FinalizeRequest):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to finalize answer: {str(e)}") from e
+
+
+@app.post("/api/plans/generate", response_model=GeneratePlanResponse)
+async def generate_agentic_plan(request: GeneratePlanRequest):
+    try:
+        persona = db.get_persona(request.persona_id)
+        if not persona:
+            raise HTTPException(status_code=404, detail="Persona not found")
+
+        persona_summary = persona.get("last_summary") or "No persona summary available."
+        planner_model = (
+            os.getenv("OLLAMA_PLANNER_MODEL")
+            or os.getenv("OLLAMA_SOTA_MODEL")
+            or ollama.model
+        )
+
+        prompt = _assemble_prompt(
+            system_instruction=(
+                "You are a planning copilot. Produce strict JSON only. "
+                "Prioritize factual, verifiable reasoning and transparent step rationale."
+            ),
+            persona_id=request.persona_id,
+            task_context=ollama.get_agentic_plan_prompt(
+                query=request.query,
+                objective=request.objective,
+                persona_summary=persona_summary,
+                facet_answers=request.facet_answers,
+                context_blob=request.context_blob,
+            ),
+        )
+
+        response_data = await ollama.generate_json(
+            prompt,
+            max_retries=2,
+            temperature=0.2,
+            top_p=0.9,
+            model=planner_model,
+        )
+
+        raw_plan = response_data.get("plan") if isinstance(response_data, dict) else None
+        if raw_plan is None:
+            raw_plan = response_data
+
+        plan = AgenticPlan.model_validate(raw_plan)
+
+        await log_event_safe(
+            "agentic_plan_generated",
+            {
+                "query": request.query,
+                "objective_id": request.objective.id,
+                "persona_id": request.persona_id,
+                "steps": len(plan.steps),
+                "model": planner_model,
+            },
+        )
+
+        return GeneratePlanResponse(plan=plan)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate plan: {str(e)}") from e
 
 @app.post("/log_event")
 async def log_event(request: LogEventRequest):
@@ -519,13 +773,72 @@ async def list_objective_reports(objective_id: str):
 
 @app.post("/api/interviews", response_model=CreateInterviewResponse)
 async def create_interview(request: CreateInterviewRequest):
+    metadata = dict(request.metadata_json)
+    if request.transcript_text:
+        participant_id = _extract_participant_id(request.transcript_text)
+        if participant_id:
+            metadata["participant_id"] = participant_id
+
     interview_id = db.create_interview(
         scope=request.scope,
         transcript_text=request.transcript_text,
         transcript_path=request.transcript_path,
-        metadata_json=request.metadata_json,
+        metadata_json=metadata,
     )
+    _write_interview_context(request.scope, request.transcript_path or "interview.txt", request.transcript_text)
     return CreateInterviewResponse(interview_id=interview_id)
+
+
+@app.post("/api/interviews/import-texts", response_model=ImportInterviewTextsResponse)
+async def import_interview_texts(request: ImportInterviewTextsRequest):
+    folder = _resolve_interview_folder(request.folder)
+    if not folder.exists() or not folder.is_dir():
+        raise HTTPException(status_code=404, detail="Interview folder not found")
+
+    glob_pattern = "**/*.txt" if request.recursive else "*.txt"
+    files = sorted([p for p in folder.glob(glob_pattern) if p.is_file()])
+    if not files:
+        return ImportInterviewTextsResponse(imported_count=0, imported_files=[], skipped_count=0, skipped_files=[])
+
+    imported_files = []
+    skipped_files = []
+    for txt_file in files:
+        resolved_path = str(txt_file.resolve())
+        existing = db.get_interview_by_scope_path(request.scope, resolved_path)
+        if existing:
+            skipped_files.append(resolved_path)
+            continue
+
+        text = txt_file.read_text(encoding="utf-8", errors="replace")
+        participant_id = _extract_participant_id(text)
+        db.create_interview(
+            scope=request.scope,
+            transcript_text=None,
+            transcript_path=resolved_path,
+            metadata_json={
+                "source": "txt-import",
+                "file_name": txt_file.name,
+                "relative_path": str(txt_file.relative_to(folder)).replace("\\", "/"),
+                "participant_id": participant_id,
+            },
+        )
+        _write_interview_context(request.scope, resolved_path)
+        imported_files.append(resolved_path)
+
+    return ImportInterviewTextsResponse(
+        imported_count=len(imported_files),
+        imported_files=imported_files,
+        skipped_count=len(skipped_files),
+        skipped_files=skipped_files,
+    )
+
+
+@app.get("/api/interviews", response_model=InterviewListResponse)
+async def list_interviews(scope_id: Optional[str] = Query(default=None)):
+    if not scope_id:
+        raise HTTPException(status_code=400, detail="scope_id is required")
+    rows = db.get_interviews(scope_id)
+    return InterviewListResponse(interviews=[_interview_row_to_response(r) for r in rows])
 
 
 @app.post("/api/personas/from-interviews", response_model=PersonaFromInterviewsResponse)
@@ -534,14 +847,21 @@ async def create_or_update_persona_from_interviews(request: PersonaFromInterview
     if not interviews:
         raise HTTPException(status_code=404, detail="No interviews found for scope")
 
+    participant_id = _extract_participant_id_from_interviews(interviews)
+    persona_name = request.persona_name or participant_id or "Unknown Persona"
+
+    identity_key = _persona_identity_key(request.scope_id, persona_name, interviews)
+
     try:
         persona_payload, summary, fragments = await extract_persona_from_interviews(
             scope_id=request.scope_id,
-            persona_name=request.persona_name,
+            persona_name=persona_name,
             interviews=interviews,
         )
     except Exception as ex:
         raise HTTPException(status_code=400, detail=f"Persona extraction failed: {ex}") from ex
+
+    existing_by_name = _find_persona_by_identity(request.scope_id, persona_name, identity_key=identity_key)
 
     if request.mode == "update":
         if not request.persona_id:
@@ -549,18 +869,161 @@ async def create_or_update_persona_from_interviews(request: PersonaFromInterview
         existing = db.get_persona(request.persona_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Persona not found")
-        db.update_persona(request.persona_id, persona_json=persona_payload, last_summary=summary, name=request.persona_name)
-        save_persona_snapshot(request.persona_id, persona_payload, fragments)
-        return PersonaFromInterviewsResponse(persona_id=request.persona_id)
+        merged_payload = merge_persona_payloads(existing.get("persona_json") or {}, persona_payload)
+        merged_summary = build_persona_summary(PersonaPayload.model_validate(merged_payload))
+        db.update_persona(
+            request.persona_id,
+            persona_json=merged_payload,
+            last_summary=merged_summary,
+            name=persona_name,
+            identity_key=identity_key,
+        )
+        _write_persona_context(request.scope_id, persona_name, merged_payload, merged_summary, identity_key)
+        save_persona_snapshot(request.persona_id, merged_payload, fragments)
+        consolidated = _consolidate_persona_duplicates(request.scope_id, persona_name, identity_key, request.persona_id)
+        return PersonaFromInterviewsResponse(persona_id=(consolidated["id"] if consolidated else request.persona_id))
+
+    if existing_by_name:
+        existing_versions = db.list_personas_by_scope_identity(request.scope_id, identity_key)
+        if not existing_versions:
+            existing_versions = db.list_personas_by_scope_name_normalized(request.scope_id, persona_name)
+        max_version = max((p.get("version", 1) for p in existing_versions), default=0)
+        new_version = max_version + 1
+        persona_id = db.create_persona(
+            name=persona_name,
+            scope=request.scope_id,
+            persona_json=persona_payload,
+            last_summary=summary,
+            identity_key=identity_key,
+            version=new_version,
+        )
+        _write_persona_context(request.scope_id, persona_name, persona_payload, summary, identity_key)
+        save_persona_snapshot(persona_id, persona_payload, fragments)
+        return PersonaFromInterviewsResponse(persona_id=persona_id)
 
     persona_id = db.create_persona(
-        name=request.persona_name,
+        name=persona_name,
         scope=request.scope_id,
         persona_json=persona_payload,
         last_summary=summary,
+        identity_key=identity_key,
     )
+    _write_persona_context(request.scope_id, persona_name, persona_payload, summary, identity_key)
     save_persona_snapshot(persona_id, persona_payload, fragments)
     return PersonaFromInterviewsResponse(persona_id=persona_id)
+
+
+@app.post("/api/personas/extract-all", response_model=ExtractAllPersonasResponse)
+async def extract_all_personas(request: ExtractAllPersonasRequest):
+    from collections import defaultdict
+    
+    interviews = db.get_interviews(request.scope_id)
+    if not interviews:
+        raise HTTPException(status_code=404, detail="No interviews found for scope")
+    
+    by_participant: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    no_participant: List[Dict[str, Any]] = []
+    
+    for interview in interviews:
+        pid = _extract_participant_id_from_interviews([interview])
+        if pid:
+            by_participant[pid].append(interview)
+        else:
+            no_participant.append(interview)
+    
+    extracted = []
+    skipped = []
+    
+    for participant_id, participant_interviews in by_participant.items():
+        identity_key = f"participant:{_canonical_identity(participant_id)}"
+        existing = db.get_persona_by_scope_identity(request.scope_id, identity_key)
+        
+        if existing and request.extract_new_only:
+            skipped.append({
+                "participant_id": participant_id,
+                "reason": "already_exists",
+                "persona_id": existing["id"],
+            })
+            continue
+        
+        try:
+            persona_payload, summary, fragments = await extract_persona_from_interviews(
+                scope_id=request.scope_id,
+                persona_name=participant_id,
+                interviews=participant_interviews,
+            )
+        except Exception as ex:
+            skipped.append({
+                "participant_id": participant_id,
+                "reason": f"extraction_failed: {ex}",
+            })
+            continue
+        
+        if existing:
+            existing_versions = db.list_personas_by_scope_identity(request.scope_id, identity_key)
+            max_version = max((p.get("version", 1) for p in existing_versions), default=0)
+            new_version = max_version + 1
+            persona_id = db.create_persona(
+                name=participant_id,
+                scope=request.scope_id,
+                persona_json=persona_payload,
+                last_summary=summary,
+                identity_key=identity_key,
+                version=new_version,
+            )
+        else:
+            persona_id = db.create_persona(
+                name=participant_id,
+                scope=request.scope_id,
+                persona_json=persona_payload,
+                last_summary=summary,
+                identity_key=identity_key,
+            )
+        
+        _write_persona_context(request.scope_id, participant_id, persona_payload, summary, identity_key)
+        save_persona_snapshot(persona_id, persona_payload, fragments)
+        
+        extracted.append({
+            "participant_id": participant_id,
+            "persona_id": persona_id,
+            "interview_count": len(participant_interviews),
+        })
+    
+    if no_participant:
+        for interview in no_participant:
+            skipped.append({
+                "interview_id": interview["id"],
+                "reason": "no_participant_id",
+            })
+    
+    return ExtractAllPersonasResponse(extracted=extracted, skipped=skipped)
+
+
+@app.put("/api/personas/{persona_id}", response_model=PersonaResponse)
+async def update_persona(persona_id: int, request: UpdatePersonaRequest):
+    existing = db.get_persona(persona_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    if request.mode == "augment":
+        next_payload = merge_persona_payloads(existing.get("persona_json") or {}, request.persona_json)
+    else:
+        next_payload = PersonaPayload.model_validate(request.persona_json).model_dump()
+
+    next_name = request.name or existing["name"]
+    next_summary = build_persona_summary(PersonaPayload.model_validate(next_payload))
+    identity_key = existing.get("identity_key")
+    db.update_persona(persona_id, persona_json=next_payload, last_summary=next_summary, name=next_name, identity_key=identity_key)
+    _write_persona_context(existing["scope"], next_name, next_payload, next_summary, identity_key)
+    save_persona_snapshot(persona_id, next_payload, [])
+
+    consolidated = _consolidate_persona_duplicates(existing["scope"], next_name, identity_key or f"name:{_canonical_identity(existing['scope'])}:{_canonical_identity(next_name)}", persona_id)
+    persona_id = int(consolidated["id"]) if consolidated else persona_id
+
+    updated = db.get_persona(persona_id)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to load updated persona")
+    return _persona_row_to_response(updated)
 
 
 @app.get("/api/personas/{persona_id}", response_model=PersonaResponse)

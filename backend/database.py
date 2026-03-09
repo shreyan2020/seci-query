@@ -87,6 +87,7 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 scope TEXT NOT NULL,
+                identity_key TEXT,
                 source TEXT NOT NULL DEFAULT 'interviews',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -115,6 +116,21 @@ class DatabaseManager:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_personas_scope
             ON personas(scope)
+        ''')
+
+        try:
+            cursor.execute("ALTER TABLE personas ADD COLUMN identity_key TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_personas_scope_name_norm
+            ON personas(lower(trim(scope)), lower(trim(name)))
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_personas_scope_identity
+            ON personas(lower(trim(scope)), identity_key)
         ''')
 
         cursor.execute('''
@@ -431,6 +447,26 @@ class DatabaseManager:
         conn.close()
         return int(interview_id)
 
+    def get_interview_by_scope_path(self, scope: str, transcript_path: str) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM interviews
+            WHERE scope = ? AND transcript_path = ?
+            ORDER BY id DESC
+            LIMIT 1
+            ''',
+            (scope, transcript_path),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        payload = dict(row)
+        payload["metadata_json"] = json.loads(payload.get("metadata_json") or "{}")
+        return payload
+
     def get_interviews(self, scope: str, interview_ids: Optional[List[int]] = None) -> List[Dict[str, Any]]:
         conn = self._connect()
         cursor = conn.cursor()
@@ -456,15 +492,18 @@ class DatabaseManager:
         scope: str,
         persona_json: Dict[str, Any],
         last_summary: str,
+        identity_key: Optional[str] = None,
+        version: Optional[int] = None,
     ) -> int:
         conn = self._connect()
         cursor = conn.cursor()
+        final_version = version if version is not None else 1
         cursor.execute(
             '''
-            INSERT INTO personas (name, scope, source, persona_json, version, last_summary)
-            VALUES (?, ?, 'interviews', ?, 1, ?)
+            INSERT INTO personas (name, scope, identity_key, source, persona_json, version, last_summary)
+            VALUES (?, ?, ?, 'interviews', ?, ?, ?)
             ''',
-            (name, scope, json.dumps(persona_json), last_summary),
+            (name, scope, identity_key, json.dumps(persona_json), final_version, last_summary),
         )
         persona_id = cursor.lastrowid
         conn.commit()
@@ -477,27 +516,48 @@ class DatabaseManager:
         persona_json: Dict[str, Any],
         last_summary: str,
         name: Optional[str] = None,
+        identity_key: Optional[str] = None,
     ):
         conn = self._connect()
         cursor = conn.cursor()
         if name:
-            cursor.execute(
-                '''
-                UPDATE personas
-                SET name=?, persona_json=?, last_summary=?, version=version+1, updated_at=CURRENT_TIMESTAMP
-                WHERE id=?
-                ''',
-                (name, json.dumps(persona_json), last_summary, persona_id),
-            )
+            if identity_key is None:
+                cursor.execute(
+                    '''
+                    UPDATE personas
+                    SET name=?, persona_json=?, last_summary=?, version=version+1, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    ''',
+                    (name, json.dumps(persona_json), last_summary, persona_id),
+                )
+            else:
+                cursor.execute(
+                    '''
+                    UPDATE personas
+                    SET name=?, identity_key=?, persona_json=?, last_summary=?, version=version+1, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    ''',
+                    (name, identity_key, json.dumps(persona_json), last_summary, persona_id),
+                )
         else:
-            cursor.execute(
-                '''
-                UPDATE personas
-                SET persona_json=?, last_summary=?, version=version+1, updated_at=CURRENT_TIMESTAMP
-                WHERE id=?
-                ''',
-                (json.dumps(persona_json), last_summary, persona_id),
-            )
+            if identity_key is None:
+                cursor.execute(
+                    '''
+                    UPDATE personas
+                    SET persona_json=?, last_summary=?, version=version+1, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    ''',
+                    (json.dumps(persona_json), last_summary, persona_id),
+                )
+            else:
+                cursor.execute(
+                    '''
+                    UPDATE personas
+                    SET identity_key=?, persona_json=?, last_summary=?, version=version+1, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    ''',
+                    (identity_key, json.dumps(persona_json), last_summary, persona_id),
+                )
         conn.commit()
         conn.close()
 
@@ -512,6 +572,111 @@ class DatabaseManager:
         payload = dict(row)
         payload["persona_json"] = json.loads(payload.get("persona_json") or "{}")
         return payload
+
+    def get_persona_by_scope_name(self, scope: str, name: str) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM personas
+            WHERE scope = ? AND name = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            ''',
+            (scope, name),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        payload = dict(row)
+        payload["persona_json"] = json.loads(payload.get("persona_json") or "{}")
+        return payload
+
+    def get_persona_by_scope_name_normalized(self, scope: str, name: str) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM personas
+            WHERE lower(trim(scope)) = lower(trim(?))
+              AND lower(trim(name)) = lower(trim(?))
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            ''',
+            (scope, name),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        payload = dict(row)
+        payload["persona_json"] = json.loads(payload.get("persona_json") or "{}")
+        return payload
+
+    def get_persona_by_scope_identity(self, scope: str, identity_key: str) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM personas
+            WHERE lower(trim(scope)) = lower(trim(?))
+              AND identity_key = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            ''',
+            (scope, identity_key),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        payload = dict(row)
+        payload["persona_json"] = json.loads(payload.get("persona_json") or "{}")
+        return payload
+
+    def list_personas_by_scope_identity(self, scope: str, identity_key: str) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM personas
+            WHERE lower(trim(scope)) = lower(trim(?))
+              AND identity_key = ?
+            ORDER BY updated_at DESC, id DESC
+            ''',
+            (scope, identity_key),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        for row in rows:
+            row["persona_json"] = json.loads(row.get("persona_json") or "{}")
+        return rows
+
+    def list_personas_by_scope_name_normalized(self, scope: str, name: str) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM personas
+            WHERE lower(trim(scope)) = lower(trim(?))
+              AND lower(trim(name)) = lower(trim(?))
+            ORDER BY updated_at DESC, id DESC
+            ''',
+            (scope, name),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        for row in rows:
+            row["persona_json"] = json.loads(row.get("persona_json") or "{}")
+        return rows
+
+    def delete_persona(self, persona_id: int):
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM personas WHERE id = ?', (persona_id,))
+        conn.commit()
+        conn.close()
 
     def list_personas(self, scope: Optional[str] = None) -> List[Dict[str, Any]]:
         conn = self._connect()
