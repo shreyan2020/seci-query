@@ -109,6 +109,18 @@ class DatabaseManager:
         ''')
 
         cursor.execute('''
+            CREATE TABLE IF NOT EXISTS workspace_memory (
+                workspace_key TEXT PRIMARY KEY,
+                scope TEXT NOT NULL DEFAULT 'default',
+                explicit_state TEXT NOT NULL DEFAULT '{}',
+                tacit_state TEXT NOT NULL DEFAULT '[]',
+                handoff_summary TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_render_jobs_status_created
             ON render_jobs(status, created_at)
         ''')
@@ -136,6 +148,11 @@ class DatabaseManager:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_interviews_scope
             ON interviews(scope)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_workspace_memory_scope_updated
+            ON workspace_memory(scope, updated_at)
         ''')
         
         conn.commit()
@@ -192,6 +209,59 @@ class DatabaseManager:
     def query_signature(self, query: str) -> str:
         """Generate a simple hash signature for a query."""
         return hashlib.md5(query.lower().strip().encode()).hexdigest()[:16]
+
+    def get_workspace_memory(self, workspace_key: str) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM workspace_memory WHERE workspace_key = ?', (workspace_key,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        data = dict(row)
+        data["explicit_state"] = json.loads(data.get("explicit_state") or "{}")
+        data["tacit_state"] = json.loads(data.get("tacit_state") or "[]")
+        return data
+
+    def upsert_workspace_memory(
+        self,
+        workspace_key: str,
+        scope: str,
+        explicit_state: Dict[str, Any],
+        tacit_state: List[Dict[str, Any]],
+        handoff_summary: str = "",
+    ) -> Dict[str, Any]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO workspace_memory (workspace_key, scope, explicit_state, tacit_state, handoff_summary, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(workspace_key) DO UPDATE SET
+                scope = excluded.scope,
+                explicit_state = excluded.explicit_state,
+                tacit_state = excluded.tacit_state,
+                handoff_summary = excluded.handoff_summary,
+                updated_at = CURRENT_TIMESTAMP
+            ''',
+            (
+                workspace_key,
+                scope,
+                json.dumps(explicit_state),
+                json.dumps(tacit_state),
+                handoff_summary,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return self.get_workspace_memory(workspace_key) or {
+            "workspace_key": workspace_key,
+            "scope": scope,
+            "explicit_state": explicit_state,
+            "tacit_state": tacit_state,
+            "handoff_summary": handoff_summary,
+            "updated_at": None,
+        }
 
     def create_report(self, title: str, qmd_path: str, objective_id: Optional[str] = None) -> int:
         conn = self._connect()

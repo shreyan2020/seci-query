@@ -77,6 +77,25 @@ interface PersonaItem {
   scope: string;
 }
 
+interface TacitMemoryItem {
+  id: string;
+  label: string;
+  inference: string;
+  evidence: string[];
+  confidence: number;
+  status: 'inferred' | 'confirmed' | 'rejected' | 'edited';
+  reviewer_note?: string | null;
+}
+
+interface WorkspaceMemory {
+  workspace_key: string;
+  scope: string;
+  explicit_state: Record<string, unknown>;
+  tacit_state: TacitMemoryItem[];
+  handoff_summary: string;
+  updated_at?: string | null;
+}
+
 // API client
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -135,6 +154,42 @@ async function generateAgenticPlan(
   return response.json();
 }
 
+async function saveWorkspaceMemory(workspaceKey: string, payload: {
+  scope: string;
+  explicit_state: Record<string, unknown>;
+  tacit_state: TacitMemoryItem[];
+  handoff_summary: string;
+}): Promise<{ memory: WorkspaceMemory | null }> {
+  const response = await fetch(`${API_BASE}/api/workspace-memory/${encodeURIComponent(workspaceKey)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error('Failed to save workspace memory');
+  return response.json();
+}
+
+async function getWorkspaceMemory(workspaceKey: string): Promise<{ memory: WorkspaceMemory | null }> {
+  const response = await fetch(`${API_BASE}/api/workspace-memory/${encodeURIComponent(workspaceKey)}`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to load workspace memory');
+  return response.json();
+}
+
+async function inferWorkspaceMemory(payload: {
+  workspace_key: string;
+  scope: string;
+  explicit_state: Record<string, unknown>;
+  existing_tacit_state: TacitMemoryItem[];
+}): Promise<{ tacit_state: TacitMemoryItem[]; handoff_summary: string }> {
+  const response = await fetch(`${API_BASE}/api/workspace-memory/infer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error('Failed to infer workspace memory');
+  return response.json();
+}
+
 // Original UI components and styling patterns
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');
@@ -165,6 +220,97 @@ function LoadingSpinner() {
   );
 }
 
+function WorkspaceMemoryPanel({
+  workspaceKey,
+  memoryStatus,
+  tacitState,
+  handoffSummary,
+  onInfer,
+  onUpdateTacitItem,
+  inferring,
+}: {
+  workspaceKey: string;
+  memoryStatus: string;
+  tacitState: TacitMemoryItem[];
+  handoffSummary: string;
+  onInfer: () => void;
+  onUpdateTacitItem: (id: string, patch: Partial<TacitMemoryItem>) => void;
+  inferring: boolean;
+}) {
+  return (
+    <div className="rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-white to-stone-50 p-4 shadow-sm">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-neutral-900">Workspace Memory</div>
+          <div className="mt-1 text-xs leading-5 text-neutral-600">
+            Central state for explicit selections and reviewable tacit knowledge. This is the layer future handoff and onboarding flows should use.
+          </div>
+          <div className="mt-1 text-[11px] text-neutral-500">Key: {workspaceKey} · {memoryStatus}</div>
+        </div>
+        <button
+          onClick={onInfer}
+          disabled={inferring}
+          className="rounded-xl bg-amber-900 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {inferring ? 'Inferring...' : 'Infer tacit state'}
+        </button>
+      </div>
+
+      {handoffSummary && (
+        <div className="mt-3 rounded-xl border border-amber-200 bg-white/80 p-3">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-800">Handoff summary</div>
+          <div className="mt-1 text-sm leading-6 text-neutral-800">{handoffSummary}</div>
+        </div>
+      )}
+
+      <div className="mt-3 space-y-2">
+        {tacitState.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-amber-200 bg-white/65 p-3 text-sm text-neutral-600">
+            No tacit memory items yet. Run inference after selecting an objective, collaborator, or adding answers/context.
+          </div>
+        ) : (
+          tacitState.map((item) => (
+            <div key={item.id} className="rounded-xl border border-amber-100 bg-white p-3">
+              <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-neutral-900">{item.label}</div>
+                  <div className="mt-1 text-sm leading-6 text-neutral-700">{item.inference}</div>
+                  {item.evidence.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {item.evidence.slice(0, 4).map((signal, index) => (
+                        <span key={`${item.id}-${index}`} className="rounded-full border border-neutral-200 bg-neutral-50 px-2 py-0.5 text-[11px] text-neutral-600">
+                          {signal}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <select
+                  value={item.status}
+                  onChange={(e) => onUpdateTacitItem(item.id, { status: e.target.value as TacitMemoryItem['status'] })}
+                  className="rounded-lg border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-800"
+                >
+                  <option value="inferred">Inferred</option>
+                  <option value="confirmed">Confirmed</option>
+                  <option value="edited">Edited</option>
+                  <option value="rejected">Rejected</option>
+                </select>
+              </div>
+              <textarea
+                value={item.reviewer_note || ''}
+                onChange={(e) => onUpdateTacitItem(item.id, { reviewer_note: e.target.value, status: item.status === 'inferred' ? 'edited' : item.status })}
+                rows={2}
+                className="mt-2 w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-900"
+                placeholder="Reviewer note: correct, nuance, or reject this inferred tacit knowledge..."
+              />
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function SECIQueryExplorer() {
   // State
   const [query, setQuery] = useState('best breakfast options');
@@ -180,12 +326,49 @@ export default function SECIQueryExplorer() {
   const [selectedPlanStepId, setSelectedPlanStepId] = useState<string>('');
   const [personas, setPersonas] = useState<PersonaItem[]>([]);
   const [personaId, setPersonaId] = useState<number | ''>('');
+  const [tacitState, setTacitState] = useState<TacitMemoryItem[]>([]);
+  const [handoffSummary, setHandoffSummary] = useState('');
+  const [memoryStatus, setMemoryStatus] = useState('not saved yet');
+  const [inferringMemory, setInferringMemory] = useState(false);
   
   // Loading states
   const [loadingObjectives, setLoadingObjectives] = useState(false);
   const [loadingAugment, setLoadingAugment] = useState(false);
   const [loadingFinalize, setLoadingFinalize] = useState(false);
   const [loadingPlan, setLoadingPlan] = useState(false);
+
+  const selectedPersona = personaId === '' ? null : personas.find((persona) => persona.id === Number(personaId)) || null;
+  const workspaceKey = React.useMemo(() => {
+    const normalized = query.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 90);
+    return normalized || 'untitled-workspace';
+  }, [query]);
+  const explicitWorkspaceState = React.useMemo<Record<string, unknown>>(() => ({
+    query,
+    context_blob: contextBlob,
+    persona_id: personaId === '' ? null : Number(personaId),
+    persona: selectedPersona?.name || null,
+    objectives,
+    selected_objective: selectedObjective,
+    facet_answers: facetAnswers,
+    evidence_items: evidenceItems,
+    augmented_answer: augmentedAnswer,
+    final_answer: finalAnswer,
+    agentic_plan: agenticPlan,
+    selected_plan_step_id: selectedPlanStepId,
+  }), [
+    query,
+    contextBlob,
+    personaId,
+    selectedPersona?.name,
+    objectives,
+    selectedObjective,
+    facetAnswers,
+    evidenceItems,
+    augmentedAnswer,
+    finalAnswer,
+    agenticPlan,
+    selectedPlanStepId,
+  ]);
 
   // Generate objectives
   const handleGenerateObjectives = async () => {
@@ -316,6 +499,32 @@ export default function SECIQueryExplorer() {
     setContextBlob('');
     setAgenticPlan(null);
     setSelectedPlanStepId('');
+    setTacitState([]);
+    setHandoffSummary('');
+  };
+
+  const updateTacitItem = (id: string, patch: Partial<TacitMemoryItem>) => {
+    setTacitState((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+  };
+
+  const handleInferWorkspaceMemory = async () => {
+    setInferringMemory(true);
+    try {
+      const response = await inferWorkspaceMemory({
+        workspace_key: workspaceKey,
+        scope: 'seci-query-explorer',
+        explicit_state: explicitWorkspaceState,
+        existing_tacit_state: tacitState,
+      });
+      setTacitState(response.tacit_state || []);
+      setHandoffSummary(response.handoff_summary || '');
+      setMemoryStatus('tacit state inferred; saving...');
+    } catch (error) {
+      console.error('Error inferring workspace memory:', error);
+      alert(error instanceof Error ? error.message : 'Failed to infer workspace memory');
+    } finally {
+      setInferringMemory(false);
+    }
   };
 
   React.useEffect(() => {
@@ -327,6 +536,49 @@ export default function SECIQueryExplorer() {
     };
     load();
   }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const loadMemory = async () => {
+      try {
+        const response = await getWorkspaceMemory(workspaceKey);
+        if (cancelled) return;
+        if (response.memory) {
+          setTacitState(response.memory.tacit_state || []);
+          setHandoffSummary(response.memory.handoff_summary || '');
+          setMemoryStatus(`loaded memory${response.memory.updated_at ? ` from ${new Date(response.memory.updated_at).toLocaleString()}` : ''}`);
+        } else {
+          setTacitState([]);
+          setHandoffSummary('');
+          setMemoryStatus('new memory record');
+        }
+      } catch {
+        if (!cancelled) setMemoryStatus('memory load unavailable');
+      }
+    };
+    loadMemory();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceKey]);
+
+  React.useEffect(() => {
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await saveWorkspaceMemory(workspaceKey, {
+          scope: 'seci-query-explorer',
+          explicit_state: explicitWorkspaceState,
+          tacit_state: tacitState,
+          handoff_summary: handoffSummary,
+        });
+        const updatedAt = response.memory?.updated_at;
+        setMemoryStatus(`saved${updatedAt ? ` at ${new Date(updatedAt).toLocaleTimeString()}` : ''}`);
+      } catch {
+        setMemoryStatus('save failed; changes are local');
+      }
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [workspaceKey, explicitWorkspaceState, tacitState, handoffSummary]);
 
   // Calculate objective stats (like original topicStats)
   const objectiveStats = objectives.reduce((acc, obj) => {
@@ -449,6 +701,16 @@ export default function SECIQueryExplorer() {
             />
           </div>
         </div>
+
+        <WorkspaceMemoryPanel
+          workspaceKey={workspaceKey}
+          memoryStatus={memoryStatus}
+          tacitState={tacitState}
+          handoffSummary={handoffSummary}
+          onInfer={handleInferWorkspaceMemory}
+          onUpdateTacitItem={updateTacitItem}
+          inferring={inferringMemory}
+        />
 
         {/* Main grid - using original layout */}
         <div className="grid gap-6 lg:grid-cols-12">

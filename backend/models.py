@@ -96,6 +96,48 @@ class GeneratePlanRequest(BaseModel):
 class GeneratePlanResponse(BaseModel):
     plan: AgenticPlan
 
+
+class TacitMemoryItem(BaseModel):
+    id: str
+    label: str
+    inference: str
+    evidence: List[str] = Field(default_factory=list)
+    confidence: float = 0.5
+    status: Literal["inferred", "confirmed", "rejected", "edited"] = "inferred"
+    reviewer_note: Optional[str] = None
+
+
+class WorkspaceMemory(BaseModel):
+    workspace_key: str
+    scope: str = "default"
+    explicit_state: Dict[str, Any] = Field(default_factory=dict)
+    tacit_state: List[TacitMemoryItem] = Field(default_factory=list)
+    handoff_summary: str = ""
+    updated_at: Optional[str] = None
+
+
+class WorkspaceMemoryRequest(BaseModel):
+    scope: str = "default"
+    explicit_state: Dict[str, Any] = Field(default_factory=dict)
+    tacit_state: List[TacitMemoryItem] = Field(default_factory=list)
+    handoff_summary: str = ""
+
+
+class WorkspaceMemoryResponse(BaseModel):
+    memory: Optional[WorkspaceMemory] = None
+
+
+class InferWorkspaceMemoryRequest(BaseModel):
+    workspace_key: str
+    scope: str = "default"
+    explicit_state: Dict[str, Any] = Field(default_factory=dict)
+    existing_tacit_state: List[TacitMemoryItem] = Field(default_factory=list)
+
+
+class InferWorkspaceMemoryResponse(BaseModel):
+    tacit_state: List[TacitMemoryItem] = Field(default_factory=list)
+    handoff_summary: str = ""
+
 class LogEventRequest(BaseModel):
     event_type: str
     payload: Dict[str, Any]

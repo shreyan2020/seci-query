@@ -26,7 +26,9 @@ from models import (
     PersonaFromInterviewsRequest, PersonaFromInterviewsResponse,
     ExtractAllPersonasRequest, ExtractAllPersonasResponse,
     GeneratePlanRequest, GeneratePlanResponse, AgenticPlan,
+    InferWorkspaceMemoryRequest, InferWorkspaceMemoryResponse,
     UpdatePersonaRequest,
+    TacitMemoryItem, WorkspaceMemory, WorkspaceMemoryRequest, WorkspaceMemoryResponse,
     PersonaResponse, PersonaListResponse,
     PersonaPayload,
 )
@@ -502,6 +504,159 @@ async def generate_agentic_plan(request: GeneratePlanRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate plan: {str(e)}") from e
+
+
+def _workspace_memory_row_to_response(row: Optional[dict]) -> Optional[WorkspaceMemory]:
+    if not row:
+        return None
+    return WorkspaceMemory(
+        workspace_key=str(row.get("workspace_key") or ""),
+        scope=str(row.get("scope") or "default"),
+        explicit_state=row.get("explicit_state") or {},
+        tacit_state=[TacitMemoryItem.model_validate(item) for item in (row.get("tacit_state") or [])],
+        handoff_summary=str(row.get("handoff_summary") or ""),
+        updated_at=row.get("updated_at"),
+    )
+
+
+def _compact_explicit_state_for_prompt(explicit_state: Dict[str, Any]) -> Dict[str, Any]:
+    keys = [
+        "query",
+        "context_blob",
+        "persona",
+        "persona_id",
+        "selected_objective",
+        "facet_answers",
+        "evidence_items",
+        "augmented_answer",
+        "final_answer",
+        "agentic_plan",
+    ]
+    compact = {key: explicit_state.get(key) for key in keys if explicit_state.get(key) not in (None, "", [], {})}
+    text = json.dumps(compact, ensure_ascii=False)
+    if len(text) > 12000:
+        compact["context_blob"] = str(compact.get("context_blob") or "")[:2000]
+        if isinstance(compact.get("agentic_plan"), dict):
+            plan = dict(compact["agentic_plan"])
+            plan["steps"] = (plan.get("steps") or [])[:4]
+            compact["agentic_plan"] = plan
+    return compact
+
+
+def _fallback_tacit_memory(request: InferWorkspaceMemoryRequest) -> InferWorkspaceMemoryResponse:
+    state = request.explicit_state or {}
+    objective = state.get("selected_objective") or {}
+    answers = state.get("facet_answers") or {}
+    items = []
+    if objective:
+        items.append(
+            TacitMemoryItem(
+                id="objective_preference",
+                label="Selected reasoning lens",
+                inference=f"The user is currently framing the work through '{objective.get('title') or 'the selected objective'}'.",
+                evidence=[objective.get("definition") or objective.get("subtitle") or "Objective mode was selected."],
+                confidence=0.75,
+            )
+        )
+    if answers:
+        items.append(
+            TacitMemoryItem(
+                id="answered_constraints",
+                label="User-supplied constraints",
+                inference="The user's facet answers should be treated as project constraints or preferences until revised.",
+                evidence=[f"{question}: {answer}" for question, answer in list(answers.items())[:4] if str(answer).strip()],
+                confidence=0.7,
+            )
+        )
+    if state.get("persona"):
+        items.append(
+            TacitMemoryItem(
+                id="collaborator_lens",
+                label="Collaborator lens",
+                inference=f"The work is being shaped for the selected collaborator/persona: {state.get('persona')}.",
+                evidence=["Persona/collaborator selected in the workspace."],
+                confidence=0.65,
+            )
+        )
+    return InferWorkspaceMemoryResponse(
+        tacit_state=items,
+        handoff_summary="Use the saved explicit state and confirmed tacit state as the starting context for future collaborators or onboarding.",
+    )
+
+
+@app.get("/api/workspace-memory/{workspace_key}", response_model=WorkspaceMemoryResponse)
+async def get_workspace_memory(workspace_key: str):
+    return WorkspaceMemoryResponse(memory=_workspace_memory_row_to_response(db.get_workspace_memory(workspace_key)))
+
+
+@app.put("/api/workspace-memory/{workspace_key}", response_model=WorkspaceMemoryResponse)
+async def save_workspace_memory(workspace_key: str, request: WorkspaceMemoryRequest):
+    row = db.upsert_workspace_memory(
+        workspace_key=workspace_key,
+        scope=request.scope,
+        explicit_state=request.explicit_state,
+        tacit_state=[item.model_dump() for item in request.tacit_state],
+        handoff_summary=request.handoff_summary,
+    )
+    await log_event_safe(
+        "workspace_memory_saved",
+        {
+            "workspace_key": workspace_key,
+            "scope": request.scope,
+            "explicit_keys": sorted(list((request.explicit_state or {}).keys())),
+            "tacit_items": len(request.tacit_state or []),
+        },
+    )
+    return WorkspaceMemoryResponse(memory=_workspace_memory_row_to_response(row))
+
+
+@app.post("/api/workspace-memory/infer", response_model=InferWorkspaceMemoryResponse)
+async def infer_workspace_memory(request: InferWorkspaceMemoryRequest):
+    compact_state = _compact_explicit_state_for_prompt(request.explicit_state or {})
+    prompt = f"""
+Infer reviewable tacit workspace memory for a scientific planning workspace.
+
+The goal is not to make final decisions. The goal is to surface assumptions, preferences, constraints,
+handoff knowledge, and collaborator-relevant context that a user should confirm, reject, or edit.
+
+Rules:
+- Return strict JSON only.
+- Do not invent facts. Every inference needs evidence from the explicit state.
+- Prefer concise items that would help onboard a new hire if the original user leaves.
+- Mark uncertain items with lower confidence.
+- Keep ids stable snake_case.
+
+Explicit workspace state:
+{json.dumps(compact_state, ensure_ascii=False, indent=2)}
+
+Existing tacit state:
+{json.dumps([item.model_dump() for item in request.existing_tacit_state], ensure_ascii=False, indent=2)}
+
+Return:
+{{
+  "tacit_state": [
+    {{
+      "id": "stable_snake_case_id",
+      "label": "short label",
+      "inference": "what the system thinks is tacitly true or important",
+      "evidence": ["specific user/objective/persona/evidence signal"],
+      "confidence": 0.0,
+      "status": "inferred",
+      "reviewer_note": null
+    }}
+  ],
+  "handoff_summary": "short onboarding-oriented summary of the current workspace state"
+}}
+""".strip()
+    try:
+        response_data = await ollama.generate_json(prompt, max_retries=2, temperature=0.2, top_p=0.9)
+        items = [TacitMemoryItem.model_validate(item) for item in response_data.get("tacit_state", [])]
+        handoff_summary = str(response_data.get("handoff_summary") or "").strip()
+        if not items and not handoff_summary:
+            return _fallback_tacit_memory(request)
+        return InferWorkspaceMemoryResponse(tacit_state=items[:12], handoff_summary=handoff_summary)
+    except Exception:
+        return _fallback_tacit_memory(request)
 
 @app.post("/log_event")
 async def log_event(request: LogEventRequest):
