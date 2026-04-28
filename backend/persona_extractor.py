@@ -99,16 +99,25 @@ def build_persona_summary(persona: PersonaPayload) -> str:
     goals = "; ".join(persona.goals[:3]) if persona.goals else "unknown goals"
     redlines = "; ".join(persona.taboo_or_redlines[:2]) if persona.taboo_or_redlines else "none"
     habits = "; ".join(persona.trust_profile.verification_habits[:2]) if persona.trust_profile.verification_habits else "none"
+    workflow_stage = persona.workflow_stage or "general"
+    workflow_focus = "; ".join(persona.workflow_focus[:3]) if persona.workflow_focus else "general workflow support"
+    project_goal = ""
+    if isinstance(persona.project_context, dict):
+        project_goal = str(persona.project_context.get("project_goal") or "").strip()
     summary = (
         f"Role: {persona.role}. "
+        f"Workflow stage: {workflow_stage}. "
         f"Expertise biotech/stats/coding: {persona.domain_expertise.biotech}/{persona.domain_expertise.stats}/{persona.domain_expertise.coding}. "
         f"Decision style: {persona.decision_style}. "
         f"Constraints: time={persona.constraints.time_sensitivity}, compliance={persona.constraints.compliance_posture}, risk={persona.constraints.risk_tolerance}. "
         f"Preferences: format={persona.preferences.output_format}, citations={persona.preferences.citation_need}, verbosity={persona.preferences.verbosity}. "
+        f"Workflow focus: {workflow_focus}. "
         f"Goals: {goals}. "
         f"Verification habits: {habits}. "
         f"Redlines: {redlines}."
     )
+    if project_goal:
+        summary += f" Program goal: {project_goal}."
     return summary[:1200]
 
 
@@ -209,6 +218,12 @@ def merge_persona_payloads(existing_payload: Dict[str, Any], incoming_payload: D
         "taboo_or_redlines": _merge_unique_strings(existing.taboo_or_redlines, incoming.taboo_or_redlines, max_items=20),
         "key_quotes": [],
         "evidence": {"support": []},
+        "workflow_stage": existing.workflow_stage if existing.workflow_stage and existing.workflow_stage != "general" else incoming.workflow_stage,
+        "workflow_focus": _merge_unique_strings(existing.workflow_focus, incoming.workflow_focus, max_items=12),
+        "project_context": {
+            **(incoming.project_context or {}),
+            **(existing.project_context or {}),
+        },
     }
 
     quote_seen = set()

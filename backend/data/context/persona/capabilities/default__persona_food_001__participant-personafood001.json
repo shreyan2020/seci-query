@@ -8,7 +8,12 @@
     "coding": "unknown"
   },
   "goals": [
-    "Maximize enjoyment of food"
+    "Maximize enjoyment of food",
+    "High Protein",
+    "Low Calorie",
+    "Savory Flavor",
+    "Eco-Friendly",
+    "Allergen-Free"
   ],
   "constraints": {
     "time_sensitivity": "low",
@@ -16,15 +21,16 @@
     "risk_tolerance": "high"
   },
   "preferences": {
-    "output_format": "unknown",
-    "citation_need": "low",
-    "verbosity": "medium"
+    "output_format": "mixed",
+    "citation_need": "medium",
+    "verbosity": "high"
   },
   "decision_style": "exploratory",
   "trust_profile": {
-    "default_reliance": "low",
+    "default_reliance": "medium",
     "verification_habits": [
-      "Trust in personal enjoyment and taste over health metrics"
+      "Trust in personal enjoyment and taste over health metrics",
+      "explicit_feedback"
     ]
   },
   "taboo_or_redlines": [],
@@ -40,6 +46,11 @@
         "claim": "Taste is the most important factor in deciding what to eat, with enjoyment taking priority over health.",
         "interview_id": 9,
         "span_hint": "Throughout the interview"
+      },
+      {
+        "claim": "Persona 5 frequently selected objectives related to dietary preferences and ethical considerations.",
+        "interview_id": 0,
+        "span_hint": "event"
       }
     ]
   }

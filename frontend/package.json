@@ -7,7 +7,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "desktop:open": "set ELECTRON_DEV=1&& set ELECTRON_WEB_URL=http://localhost:3000&& electron .",
+    "desktop:dev": "concurrently -k -n API,WEB,DESKTOP -c magenta,cyan,green \"python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload --app-dir ../backend\" \"next dev -p 3000\" \"wait-on tcp:3000 tcp:8000 && npm run desktop:open\"",
+    "desktop:build-note": "echo Packaging is not configured yet; this starts a native desktop preview.",
+    "desktop:pack": "npm run build && electron-builder --dir",
+    "desktop:dist:win": "npm run build && electron-builder --win nsis"
   },
   "dependencies": {
     "next": "^16.1.6",
@@ -19,10 +24,75 @@
     "@types/node": "^22.10.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "concurrently": "^9.2.1",
+    "electron": "^35.1.4",
+    "electron-builder": "^26.8.1",
     "eslint": "^9.18.0",
     "eslint-config-next": "^15.1.6",
     "postcss": "^8.5.1",
     "tailwindcss": "^4.0.6",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "wait-on": "^8.0.3"
+  },
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "com.seci.personastudio",
+    "productName": "SECI Persona Studio",
+    "artifactName": "SECI-Persona-Studio-${version}-${arch}.${ext}",
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!__pycache__/**",
+          "!*.pyc"
+        ]
+      },
+      {
+        "from": ".next/standalone",
+        "to": "web",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".next/standalone/node_modules",
+        "to": "web/node_modules",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".next/static",
+        "to": "web/.next/static",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "public",
+        "to": "web/public",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

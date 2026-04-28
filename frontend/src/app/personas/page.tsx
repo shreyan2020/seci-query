@@ -1,340 +1,447 @@
-'use client';
+﻿'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 
 interface Persona {
   id: number;
   name: string;
   scope: string;
+  project_id?: number | null;
+  identity_key?: string | null;
   version: number;
   last_summary: string;
   persona_json: Record<string, unknown>;
 }
 
-interface InterviewItem {
+interface ProjectOption {
   id: number;
-  scope: string;
-  transcript_path?: string | null;
+  name: string;
+  scope_id: string;
+  end_product: string;
+}
+
+interface PersonaChangeLogItem {
+  source_persona_id: number;
+  new_persona_id: number;
   created_at: string;
+  changes: string[];
+  reasons: string[];
+  supporting_events: Record<string, number>;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+function classNames(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(' ');
+}
+
+function prettyName(raw: string) {
+  return raw.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function isStarterPersona(p: Persona) {
+  const key = (p.identity_key || '').toLowerCase();
+  return key.startsWith('starter:') || key.startsWith('template:');
+}
+
+function isProjectPersona(p: Persona) {
+  return p.project_id !== null && p.project_id !== undefined;
+}
+
 export default function PersonasPage() {
-  const [personas, setPersonas] = useState<Persona[]>([]);
   const [scopeId, setScopeId] = useState('default');
-  const [interviewIds, setInterviewIds] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [projects, setProjects] = useState<ProjectOption[]>([]);
+  const [projectIdFilter, setProjectIdFilter] = useState<number | ''>('');
+  const [personas, setPersonas] = useState<Persona[]>([]);
   const [selected, setSelected] = useState<Persona | null>(null);
-  const [folder, setFolder] = useState('');
-  const [interviews, setInterviews] = useState<InterviewItem[]>([]);
-  const [importing, setImporting] = useState(false);
-  const [editableName, setEditableName] = useState('');
-  const [editableJson, setEditableJson] = useState('');
-  const [saveMode, setSaveMode] = useState<'augment' | 'replace'>('augment');
-  const [saving, setSaving] = useState(false);
-  const [extracting, setExtracting] = useState(false);
+  const [changeLog, setChangeLog] = useState<PersonaChangeLogItem[]>([]);
+
   const [status, setStatus] = useState<{ type: 'info' | 'success' | 'error'; message: string } | null>(null);
+  const [resetting, setResetting] = useState(false);
 
-  const clearStatus = useCallback(() => setStatus(null), []);
+  const [uploadName, setUploadName] = useState('');
+  const [uploadContent, setUploadContent] = useState('');
+  const [uploading, setUploading] = useState(false);
 
-  const load = async () => {
-    const [personaRes, interviewRes] = await Promise.all([
-      fetch(`${API_BASE}/api/personas`, { cache: 'no-store' }),
-      fetch(`${API_BASE}/api/interviews?scope_id=${encodeURIComponent(scopeId)}`, { cache: 'no-store' }),
-    ]);
-    if (personaRes.ok) {
-      const data = await personaRes.json();
-      setPersonas(data.personas || []);
+  const [editorJson, setEditorJson] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    const url = projectIdFilter === ''
+      ? `${API_BASE}/api/personas?scope_id=${encodeURIComponent(scopeId)}`
+      : `${API_BASE}/api/personas?project_id=${projectIdFilter}`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) {
+      setPersonas([]);
+      setSelected(null);
+      return;
     }
-    if (interviewRes.ok) {
-      const data = await interviewRes.json();
-      setInterviews(data.interviews || []);
+    const data = await res.json();
+    const rows = (data.personas || []) as Persona[];
+    setPersonas(rows);
+    setSelected((prev) => {
+      if (!prev) return rows[0] || null;
+      return rows.find((p) => p.id === prev.id) || rows[0] || null;
+    });
+  }, [scopeId, projectIdFilter]);
+
+  const loadProjects = useCallback(async () => {
+    const res = await fetch(`${API_BASE}/api/projects`, { cache: 'no-store' });
+    if (!res.ok) {
+      setProjects([]);
+      return;
     }
-  };
+    const data = await res.json();
+    setProjects(data.projects || []);
+  }, []);
+
+  const loadChangeLog = useCallback(async (personaId: number) => {
+    const res = await fetch(`${API_BASE}/api/personas/${personaId}/change-log?limit=8`, { cache: 'no-store' });
+    if (!res.ok) {
+      setChangeLog([]);
+      return;
+    }
+    const data = await res.json();
+    setChangeLog(data.items || []);
+  }, []);
 
   useEffect(() => {
     load();
-  }, [scopeId]);
+  }, [load]);
 
   useEffect(() => {
-    if (status?.type === 'success') {
-      const timer = setTimeout(clearStatus, 5000);
-      return () => clearTimeout(timer);
-    }
-  }, [status, clearStatus]);
+    loadProjects().catch(() => {});
+  }, [loadProjects]);
 
-  const importTxtFiles = async () => {
-    setImporting(true);
-    setStatus({ type: 'info', message: 'Scanning for .txt files...' });
+  useEffect(() => {
+    if (projectIdFilter === '') return;
+    const active = projects.find((project) => project.id === Number(projectIdFilter));
+    if (active?.scope_id) {
+      setScopeId(active.scope_id);
+    }
+  }, [projectIdFilter, projects]);
+
+  useEffect(() => {
+    if (!selected) {
+      setEditorJson('');
+      setChangeLog([]);
+      return;
+    }
+    setEditorJson(JSON.stringify(selected.persona_json || {}, null, 2));
+    loadChangeLog(selected.id);
+  }, [selected, loadChangeLog]);
+
+  const starterCount = useMemo(() => personas.filter(isStarterPersona).length, [personas]);
+  const projectCount = useMemo(() => personas.filter(isProjectPersona).length, [personas]);
+  const customCount = useMemo(() => personas.filter((p) => !isStarterPersona(p) && !isProjectPersona(p)).length, [personas]);
+  const activeProject = projectIdFilter === '' ? null : projects.find((project) => project.id === Number(projectIdFilter)) || null;
+
+  const handleResetToStarters = async () => {
+    if (projectIdFilter !== '') {
+      setStatus({ type: 'error', message: 'Project personas are managed per project. Switch back to default scope to reset starter personas.' });
+      return;
+    }
+    setResetting(true);
+    setStatus({ type: 'info', message: 'Resetting personas to biotech starters...' });
     try {
-      const res = await fetch(`${API_BASE}/api/interviews/import-texts`, {
+      const res = await fetch(`${API_BASE}/api/personas/reset-to-starters`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope_id: scopeId }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to reset personas');
+      }
+      const data = await res.json();
+      setStatus({ type: 'success', message: `Reset complete. Removed ${data.removed_count} persona(s), seeded ${data.created_persona_ids?.length || 0} starter persona(s).` });
+      setSelected(null);
+      await load();
+    } catch (err) {
+      setStatus({ type: 'error', message: err instanceof Error ? err.message : 'Failed to reset personas' });
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  const handlePickMdFile = async (file: File) => {
+    const text = await file.text();
+    setUploadContent(text);
+    if (!uploadName.trim()) {
+      const base = file.name.replace(/\.md$/i, '').replace(/[_-]+/g, ' ').trim();
+      setUploadName(base);
+    }
+  };
+
+  const handleImportMarkdown = async () => {
+    if (projectIdFilter !== '') {
+      setStatus({ type: 'error', message: 'Markdown import is currently available for default scope personas only.' });
+      return;
+    }
+    if (!uploadContent.trim()) {
+      setStatus({ type: 'error', message: 'Please select an .md file first.' });
+      return;
+    }
+    setUploading(true);
+    setStatus({ type: 'info', message: 'Importing custom persona from markdown...' });
+    try {
+      const res = await fetch(`${API_BASE}/api/personas/import-markdown`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          scope: scopeId,
-          folder: folder || undefined,
-          recursive: true,
+          scope_id: scopeId,
+          name: uploadName || undefined,
+          markdown: uploadContent,
         }),
       });
-      if (!res.ok) throw new Error('Failed to import txt files');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to import markdown persona');
+      }
       const data = await res.json();
-      setStatus({ 
-        type: 'success', 
-        message: `Imported ${data.imported_count} file(s), skipped ${data.skipped_count} existing.` 
-      });
+      setStatus({ type: 'success', message: data.created ? `Created custom persona ${data.name} (v${data.version}).` : `Updated custom persona ${data.name} to v${data.version}.` });
+      setUploadContent('');
       await load();
+      const picked = personas.find((p) => p.id === data.persona_id);
+      if (picked) setSelected(picked);
+    } catch (err) {
+      setStatus({ type: 'error', message: err instanceof Error ? err.message : 'Failed to import markdown persona' });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleSavePersona = async () => {
+    if (!selected) return;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(editorJson);
     } catch {
-      setStatus({ type: 'error', message: 'Failed to import txt files' });
-    } finally {
-      setImporting(false);
+      setStatus({ type: 'error', message: 'Invalid JSON in editor.' });
+      return;
     }
-  };
 
-  const createFromInterviews = async () => {
-    setLoading(true);
-    setStatus({ type: 'info', message: 'Extracting persona from interviews...' });
+    setSaving(true);
+    setStatus({ type: 'info', message: 'Saving persona updates...' });
     try {
-      const ids = interviewIds
-        .split(',')
-        .map((x) => x.trim())
-        .filter(Boolean)
-        .map((x) => Number(x))
-        .filter((x) => !Number.isNaN(x));
-
-      const res = await fetch(`${API_BASE}/api/personas/from-interviews`, {
-        method: 'POST',
+      const res = await fetch(`${API_BASE}/api/personas/${selected.id}`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          scope_id: scopeId,
-          interview_ids: ids.length ? ids : undefined,
-          mode: 'create',
+          name: selected.name,
+          persona_json: parsed,
+          mode: 'replace',
         }),
       });
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || 'Failed to create persona');
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to save persona');
       }
-      const data = await res.json();
-      setStatus({ type: 'success', message: `Persona created successfully (ID: ${data.persona_id})` });
+      setStatus({ type: 'success', message: 'Persona updated.' });
       await load();
     } catch (err) {
-      setStatus({ type: 'error', message: err instanceof Error ? err.message : 'Failed to create persona' });
+      setStatus({ type: 'error', message: err instanceof Error ? err.message : 'Failed to save persona' });
     } finally {
-      setLoading(false);
-    }
-  };
-
-  const extractAllPersonas = async () => {
-    setExtracting(true);
-    setStatus({ type: 'info', message: 'Extracting personas from all interviews...' });
-    try {
-      const res = await fetch(`${API_BASE}/api/personas/extract-all`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          scope_id: scopeId,
-          extract_new_only: true,
-        }),
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || 'Failed to extract personas');
-      }
-      const data = await res.json();
-      const extracted = data.extracted || [];
-      const skipped = data.skipped || [];
-      let msg = `Extracted ${extracted.length} persona(s)`;
-      if (extracted.length > 0) {
-        msg += `: ${extracted.map((e: { participant_id: string }) => e.participant_id).join(', ')}`;
-      }
-      if (skipped.length > 0) {
-        msg += `. Skipped ${skipped.length} (already exist or no ID).`;
-      }
-      setStatus({ type: 'success', message: msg });
-      await load();
-    } catch (err) {
-      setStatus({ type: 'error', message: err instanceof Error ? err.message : 'Failed to extract personas' });
-    } finally {
-      setExtracting(false);
+      setSaving(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-neutral-50 p-6">
-      <div className="mx-auto max-w-6xl space-y-4">
-        <Link href="/" className="inline-flex items-center gap-1 text-sm text-neutral-600 hover:text-neutral-900">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
-            <path fillRule="evenodd" d="M17 10a.75.75 0 01-.75.75H5.612l4.158 3.958a.75.75 0 11-1.04 1.08l-5.5-5.25a.75.75 0 010-1.08l5.5-5.25a.75.75 0 111.04 1.08L5.612 9.25H16.25A.75.75 0 0117 10z" clipRule="evenodd" />
-          </svg>
-          Back to main
-        </Link>
-        {status && (
-          <div
-            className={`flex items-center justify-between gap-2 rounded-xl px-4 py-2 text-sm ${
-              status.type === 'success'
-                ? 'bg-green-50 text-green-800 border border-green-200'
-                : status.type === 'error'
-                ? 'bg-red-50 text-red-800 border border-red-200'
-                : 'bg-blue-50 text-blue-800 border border-blue-200'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              {status.type === 'info' && (
-                <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-              )}
-              {status.message}
-            </div>
-            <button onClick={clearStatus} className="text-current opacity-60 hover:opacity-100">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
-                <path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
-              </svg>
-            </button>
-          </div>
-        )}
-        <div className="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
-          <div className="text-lg font-semibold text-neutral-900">Personas</div>
-          <div className="mt-3 grid gap-2 md:grid-cols-6">
-            <input
-              value={scopeId}
-              onChange={(e) => setScopeId(e.target.value)}
-              placeholder="scope_id"
-              className="rounded-xl border border-neutral-200 px-3 py-2 text-sm"
-            />
-            <input
-              value={folder}
-              onChange={(e) => setFolder(e.target.value)}
-              placeholder="txt folder under data/interviews"
-              className="rounded-xl border border-neutral-200 px-3 py-2 text-sm"
-            />
-            <button
-              onClick={importTxtFiles}
-              disabled={importing}
-              className="rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm font-semibold text-neutral-900 disabled:opacity-60"
-            >
-              {importing ? 'Importing...' : 'Import .txt'}
-            </button>
-            <button
-              onClick={extractAllPersonas}
-              disabled={extracting || interviews.length === 0}
-              className="rounded-xl bg-neutral-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
-            >
-              {extracting ? 'Extracting...' : 'Extract All Personas'}
-            </button>
-            <input
-              value={interviewIds}
-              onChange={(e) => setInterviewIds(e.target.value)}
-              placeholder="interview ids: 1,2,3 (optional)"
-              className="rounded-xl border border-neutral-200 px-3 py-2 text-sm"
-            />
-            <button
-              onClick={createFromInterviews}
-              disabled={loading}
-              className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm font-semibold text-neutral-700 disabled:opacity-60"
-            >
-              {loading ? 'Creating...' : 'Create Single'}
-            </button>
-          </div>
-          <div className="mt-2 text-xs text-neutral-600">
-            Drop transcript files in <span className="font-mono">backend/data/interviews</span> (or a subfolder).
-            Interviews: <span className="font-semibold">{interviews.length}</span> · 
-            Personas: <span className="font-semibold">{personas.length}</span>
-          </div>
+    <div className="min-h-screen bg-[radial-gradient(circle_at_15%_0%,#dbeafe_0%,#f8fafc_45%,#eef2ff_100%)] p-6">
+      <div className="mx-auto max-w-7xl space-y-5">
+        <div className="flex items-center justify-between">
+          <Link href="/" className="text-sm text-slate-600 hover:text-slate-900">Back</Link>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
-            <div className="mb-2 text-sm font-semibold text-neutral-900">Persona list</div>
+        <section className="rounded-3xl border border-slate-200 bg-white/90 p-5 shadow-sm">
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Persona Studio (Biotech)</h1>
+          <p className="mt-1 text-sm text-slate-600">
+            Inspect default personas or open a specific project to see the personas generated and stored for that biotech program.
+          </p>
+
+          {status && (
+            <div className={classNames(
+              'mt-4 rounded-xl border px-3 py-2 text-sm',
+              status.type === 'success' && 'border-emerald-200 bg-emerald-50 text-emerald-800',
+              status.type === 'error' && 'border-rose-200 bg-rose-50 text-rose-800',
+              status.type === 'info' && 'border-sky-200 bg-sky-50 text-sky-800'
+            )}>
+              {status.message}
+            </div>
+          )}
+
+          <div className="mt-4 grid gap-3 lg:grid-cols-3">
+            <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-indigo-900">Project Or Scope</div>
+              <select
+                value={projectIdFilter}
+                onChange={(e) => setProjectIdFilter(e.target.value === '' ? '' : Number(e.target.value))}
+                className="mt-2 w-full rounded-xl border border-indigo-200 bg-white px-3 py-2 text-sm"
+              >
+                <option value="">Default personas</option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+
+              {projectIdFilter === '' ? (
+                <>
+                  <input
+                    value={scopeId}
+                    onChange={(e) => setScopeId(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-indigo-200 bg-white px-3 py-2 text-sm"
+                  />
+                  <button
+                    onClick={handleResetToStarters}
+                    disabled={resetting}
+                    className="mt-2 w-full rounded-xl border border-indigo-300 bg-white px-3 py-2 text-sm font-semibold text-indigo-900 disabled:opacity-50"
+                  >
+                    {resetting ? 'Resetting...' : 'Reset To Starter Personas'}
+                  </button>
+                </>
+              ) : (
+                <div className="mt-2 rounded-xl border border-indigo-200 bg-white p-3 text-sm text-indigo-950">
+                  <div className="font-semibold">{activeProject?.name || 'Project'}</div>
+                  <div className="mt-1 text-xs text-indigo-800">{activeProject?.end_product || 'No project details loaded.'}</div>
+                  <div className="mt-2 text-[11px] uppercase tracking-wide text-indigo-700">Stored scope</div>
+                  <div className="mt-1 text-xs text-indigo-900">{scopeId}</div>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 lg:col-span-2">
+              <div className="text-xs font-semibold uppercase tracking-wide text-emerald-900">Upload Custom Persona (.md)</div>
+              <div className="mt-2 grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+                <input
+                  value={uploadName}
+                  onChange={(e) => setUploadName(e.target.value)}
+                  placeholder="Custom persona name (optional)"
+                  disabled={projectIdFilter !== ''}
+                  className="rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm"
+                />
+                <input
+                  type="file"
+                  accept=".md,text/markdown"
+                  disabled={projectIdFilter !== ''}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handlePickMdFile(file).catch(() => {});
+                  }}
+                  className="rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm"
+                />
+                <button
+                  onClick={handleImportMarkdown}
+                  disabled={uploading || projectIdFilter !== ''}
+                  className="rounded-xl border border-emerald-300 bg-white px-3 py-2 text-sm font-semibold text-emerald-900 disabled:opacity-50"
+                >
+                  {uploading ? 'Importing...' : 'Import Persona'}
+                </button>
+              </div>
+              <div className="mt-2 text-xs text-emerald-800">
+                Starter personas: {starterCount} | Project personas: {projectCount} | Custom personas: {customCount}
+              </div>
+              {projectIdFilter !== '' && (
+                <div className="mt-2 text-xs text-emerald-900">
+                  Project personas are already stored with the selected project. You can inspect and edit them below.
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <section className="grid gap-4 lg:grid-cols-[320px_1fr]">
+          <aside className="rounded-3xl border border-slate-200 bg-white/90 p-4 shadow-sm">
+            <div className="mb-2 text-sm font-semibold text-slate-900">Personas</div>
             <div className="space-y-2">
               {personas.map((p) => (
                 <button
                   key={p.id}
-                  onClick={() => {
-                    setSelected(p);
-                    setEditableName(p.name);
-                    setEditableJson(JSON.stringify(p.persona_json, null, 2));
-                  }}
-                  className="w-full rounded-xl border border-neutral-200 p-3 text-left text-sm hover:bg-neutral-50"
+                  onClick={() => setSelected(p)}
+                  className={classNames(
+                    'w-full rounded-xl border px-3 py-2 text-left text-xs transition',
+                    selected?.id === p.id ? 'border-cyan-300 bg-cyan-50 text-cyan-900' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                  )}
                 >
-                  <div className="font-semibold text-neutral-900">{p.name}</div>
-                  <div className="text-xs text-neutral-600">
-                    scope={p.scope} · version={p.version}
+                  <div className="font-semibold text-sm text-slate-900">{prettyName(p.name)}</div>
+                  <div className="mt-1 flex items-center gap-2 text-[11px]">
+                    <span>v{p.version}</span>
+                    <span>ID {p.id}</span>
+                    <span
+                      className={classNames(
+                        'rounded-full px-2 py-0.5',
+                        isProjectPersona(p)
+                          ? 'bg-sky-100 text-sky-900'
+                          : isStarterPersona(p)
+                            ? 'bg-indigo-100 text-indigo-900'
+                            : 'bg-emerald-100 text-emerald-900'
+                      )}
+                    >
+                      {isProjectPersona(p) ? 'Project' : isStarterPersona(p) ? 'Starter' : 'Custom'}
+                    </span>
                   </div>
-                  <div className="mt-1 line-clamp-2 text-xs text-neutral-700">{p.last_summary}</div>
                 </button>
               ))}
             </div>
-          </div>
+          </aside>
 
-          <div className="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
-            <div className="mb-2 text-sm font-semibold text-neutral-900">Persona viewer</div>
+          <main className="space-y-4">
             {!selected ? (
-              <div className="text-sm text-neutral-600">Select a persona from the list.</div>
+              <div className="rounded-3xl border border-slate-200 bg-white/90 p-8 text-sm text-slate-600 shadow-sm">Select a persona to inspect or edit.</div>
             ) : (
               <>
-                <div className="mb-2 text-xs text-neutral-700">{selected.last_summary}</div>
-                <input
-                  value={editableName}
-                  onChange={(e) => setEditableName(e.target.value)}
-                  className="mb-2 w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm"
-                />
-                <textarea
-                  value={editableJson}
-                  onChange={(e) => setEditableJson(e.target.value)}
-                  rows={20}
-                  className="w-full rounded-xl border border-neutral-200 bg-neutral-50 p-3 font-mono text-xs text-neutral-800"
-                />
-                <div className="mt-2 flex items-center gap-2">
-                  <select
-                    value={saveMode}
-                    onChange={(e) => setSaveMode(e.target.value as 'augment' | 'replace')}
-                    className="rounded-xl border border-neutral-200 px-3 py-2 text-sm"
-                  >
-                    <option value="augment">Augment</option>
-                    <option value="replace">Replace</option>
-                  </select>
-                  <button
-                    onClick={async () => {
-                      if (!selected) return;
-                      setSaving(true);
-                      try {
-                        const parsed = JSON.parse(editableJson);
-                        const res = await fetch(`${API_BASE}/api/personas/${selected.id}`, {
-                          method: 'PUT',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({
-                            name: editableName,
-                            persona_json: parsed,
-                            mode: saveMode,
-                          }),
-                        });
-                        if (!res.ok) throw new Error('Failed to save persona');
-                        const updated = await res.json();
-                        setSelected(updated);
-                        setEditableName(updated.name);
-                        setEditableJson(JSON.stringify(updated.persona_json, null, 2));
-                        await load();
-                      } catch {
-                        alert('Failed to save persona. Check JSON format and schema.');
-                      } finally {
-                        setSaving(false);
-                      }
-                    }}
-                    disabled={saving}
-                    className="rounded-xl bg-neutral-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                  >
-                    {saving ? 'Saving...' : 'Save Persona'}
-                  </button>
-                </div>
+                <section className="rounded-3xl border border-slate-200 bg-white/90 p-5 shadow-sm">
+                  <div className="text-xl font-semibold text-slate-900">{prettyName(selected.name)}</div>
+                  <div className="mt-1 text-xs text-slate-600">Version v{selected.version} | Scope {selected.scope} | ID {selected.id}</div>
+                  <div className="mt-3 text-sm text-slate-700">{selected.last_summary || 'No summary available yet.'}</div>
+                </section>
+
+                <section className="rounded-3xl border border-slate-200 bg-white/90 p-5 shadow-sm">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold text-slate-900">Persona JSON Editor</div>
+                    <button
+                      onClick={handleSavePersona}
+                      disabled={saving}
+                      className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-900 disabled:opacity-50"
+                    >
+                      {saving ? 'Saving...' : 'Save Updates'}
+                    </button>
+                  </div>
+                  <textarea
+                    value={editorJson}
+                    onChange={(e) => setEditorJson(e.target.value)}
+                    rows={18}
+                    className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs text-slate-900"
+                  />
+                </section>
+
+                <section className="rounded-3xl border border-slate-200 bg-white/90 p-5 shadow-sm">
+                  <div className="text-sm font-semibold text-slate-900">Recent Learning Updates</div>
+                  {changeLog.length === 0 ? (
+                    <div className="mt-2 text-sm text-slate-600">No learning updates recorded yet.</div>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      {changeLog.map((item, idx) => (
+                        <div key={`${item.new_persona_id}-${idx}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                          <div className="text-xs font-semibold text-slate-800">Update {idx + 1} | {item.created_at}</div>
+                          <ul className="mt-1 list-disc pl-4 text-xs text-slate-700">
+                            {(item.changes || []).slice(0, 4).map((c, i) => (
+                              <li key={`${i}-${c}`}>{c}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
               </>
             )}
-          </div>
-        </div>
+          </main>
+        </section>
       </div>
     </div>
   );
 }
+

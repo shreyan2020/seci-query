@@ -1,7 +1,8 @@
 import httpx
+import inspect
 import json
 import os
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 from models import Objective, EvidenceItem
 
 class OllamaClient:
@@ -82,6 +83,114 @@ class OllamaClient:
                 continue
         
         raise ValueError("Unexpected error in JSON generation")
+
+    async def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        temperature: float = 0.2,
+        top_p: float = 0.9,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": model or self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "top_p": top_p,
+            },
+        }
+        if tools:
+            payload["tools"] = tools
+
+        timeout = httpx.Timeout(300.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(f"{self.base_url}/api/chat", json=payload)
+            response.raise_for_status()
+            return response.json()
+
+    async def run_tool_loop(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        tools: List[Dict[str, Any]],
+        tool_handlers: Dict[str, Callable[..., Any]],
+        model: Optional[str] = None,
+        max_rounds: int = 4,
+        temperature: float = 0.2,
+        top_p: float = 0.9,
+    ) -> List[Dict[str, Any]]:
+        messages: List[Dict[str, Any]] = []
+        if system_prompt.strip():
+            messages.append({"role": "system", "content": system_prompt.strip()})
+        messages.append({"role": "user", "content": user_prompt.strip()})
+
+        for _ in range(max_rounds):
+            response = await self.chat(
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                model=model,
+            )
+            message = response.get("message") or {}
+            assistant_message = {
+                "role": "assistant",
+                "content": message.get("content") or "",
+            }
+            if message.get("thinking"):
+                assistant_message["thinking"] = message.get("thinking")
+            if message.get("tool_calls"):
+                assistant_message["tool_calls"] = message.get("tool_calls")
+            messages.append(assistant_message)
+
+            tool_calls = message.get("tool_calls") or []
+            if not tool_calls:
+                break
+
+            for call in tool_calls:
+                function = call.get("function") or {}
+                name = str(function.get("name") or "").strip()
+                raw_arguments = function.get("arguments") or {}
+                if isinstance(raw_arguments, str):
+                    try:
+                        raw_arguments = json.loads(raw_arguments)
+                    except json.JSONDecodeError:
+                        raw_arguments = {}
+                handler = tool_handlers.get(name)
+                if not handler:
+                    result: Any = {"error": f"unknown_tool:{name}"}
+                else:
+                    try:
+                        if inspect.iscoroutinefunction(handler):
+                            result = await handler(**raw_arguments)
+                        else:
+                            result = handler(**raw_arguments)
+                    except Exception as exc:
+                        result = {"error": str(exc)}
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_name": name,
+                        "content": json.dumps(result),
+                    }
+                )
+
+        return messages
+
+    def collect_tool_messages(self, messages: List[Dict[str, Any]]) -> str:
+        chunks: List[str] = []
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            name = str(message.get("tool_name") or "tool").strip()
+            content = str(message.get("content") or "").strip()
+            if not content:
+                continue
+            chunks.append(f"Tool {name} result:\n{content}")
+        return "\n\n".join(chunks)
 
     async def ollama_generate(
         self,
@@ -300,6 +409,218 @@ Return ONLY valid JSON using this exact shape:
 }}
 
 Return ONLY valid JSON. No markdown, no code blocks."""
+
+    def get_project_persona_generation_prompt(self, project: Dict[str, Any]) -> str:
+        return f"""You are designing a product-specific biotech project team.
+
+Project brief:
+- name: {project.get("name")}
+- end_product: {project.get("end_product")}
+- target_host: {project.get("target_host")}
+- project_goal: {project.get("project_goal")}
+- raw_material_focus: {project.get("raw_material_focus") or "none"}
+- notes: {project.get("notes") or "none"}
+
+Task:
+Generate 4 to 6 distinct personas tailored to THIS product program. They should collectively cover the full workflow,
+including raw materials or sourcing, strain/pathway design, upstream process, downstream recovery, and economics or program gating.
+Make the personas product-specific when the brief suggests a specialized concern. For example, if the product implies precursor,
+toxicity, extraction, purification, or formulation issues, reflect that in the persona names and focus areas.
+Include one persona that is explicitly strong at literature, benchmark, or evidence synthesis so the team can answer questions
+about successful strategies, examples, latest improvement options, and open technical challenges.
+
+Allowed workflow_stage values:
+- feedstock
+- strain_engineering
+- upstream_process
+- downstream_processing
+- economics
+- regulatory_quality
+- analytics
+
+Enum rules:
+- domain_expertise values must be one of: novice, intermediate, expert, unknown
+- time_sensitivity, risk_tolerance, citation_need, verbosity must be one of: low, medium, high, unknown
+- compliance_posture must be one of: flexible, moderate, strict, unknown
+- output_format must be one of: steps, table, narrative, mixed, unknown
+- decision_style must be one of: exploratory, confirmatory, production, unknown
+- default_reliance must be one of: low, medium, high, unknown
+
+Return ONLY valid JSON with this exact structure:
+{{
+  "personas": [
+    {{
+      "name": "string",
+      "workflow_stage": "feedstock",
+      "focus_area": "string",
+      "starter_questions": ["string", "string"],
+      "role": "string",
+      "domain_expertise": {{"biotech": "expert", "stats": "intermediate", "coding": "unknown"}},
+      "goals": ["string", "string", "string"],
+      "constraints": {{"time_sensitivity": "medium", "compliance_posture": "moderate", "risk_tolerance": "medium"}},
+      "preferences": {{"output_format": "mixed", "citation_need": "medium", "verbosity": "medium"}},
+      "decision_style": "production",
+      "trust_profile": {{"default_reliance": "medium", "verification_habits": ["string", "string"]}},
+      "taboo_or_redlines": ["string"],
+      "workflow_focus": ["string", "string", "string"]
+    }}
+  ]
+}}
+
+Requirements:
+1) Every persona must have a concrete name, not a generic label like Persona 1.
+2) Keep the team tightly tied to the product brief.
+3) Use short, operational focus areas and starter questions.
+4) Ensure the set of personas covers the full workflow without near-duplicates.
+5) At least one persona should use workflow_stage="analytics" and focus on literature or benchmark reasoning.
+
+Return ONLY valid JSON. No markdown, no code blocks."""
+
+    def get_project_plan_prompt(
+        self,
+        project: Dict[str, Any],
+        persona_summary: str,
+        focus_question: Optional[str] = None,
+        notes: Optional[str] = None,
+        clarifying_answers: Optional[Dict[str, str]] = None,
+        reasoning_notes: Optional[str] = None,
+        work_template_summary: Optional[str] = None,
+    ) -> str:
+        focus = focus_question.strip() if focus_question else "Build the highest-leverage next-step workflow for this program."
+        note_block = notes.strip() if notes else "none"
+        answer_block = (
+            "\n".join(f"- {question}: {answer}" for question, answer in (clarifying_answers or {}).items() if str(answer or "").strip())
+            or "none"
+        )
+        reasoning_block = reasoning_notes.strip() if reasoning_notes else "none"
+        work_template_block = work_template_summary.strip() if work_template_summary else "none"
+
+        return f"""You are an elite biotech collaboration agent. Build an editable, concrete working draft.
+
+Project:
+- name: {project.get("name")}
+- end_product: {project.get("end_product")}
+- target_host: {project.get("target_host")}
+- project_goal: {project.get("project_goal")}
+- raw_material_focus: {project.get("raw_material_focus") or "none"}
+- notes: {project.get("notes") or "none"}
+
+Selected planning focus:
+{focus}
+
+Persona summary:
+{persona_summary}
+
+Clarifying answers:
+{answer_block}
+
+Current user reasoning or synthesis:
+{reasoning_block}
+
+Structured research work template:
+{work_template_block}
+
+Project context and constraints:
+{note_block}
+
+Planning requirements:
+1) Let the working question determine scope. Do NOT force the full biotech workflow if the question is narrower.
+2) Use the persona as a collaborator lens, not a reason to inject unrelated sections.
+3) Only include raw materials, sourcing, or cost analysis if the question explicitly asks for it, the project context highlights it, or it is a true blocking dependency.
+4) If the working question is about literature, benchmarks, examples, latest improvement options, or open questions, produce an evidence-synthesis draft:
+   - scope the search/problem framing
+   - identify comparison axes
+   - extract successful strategies and benchmark examples
+   - map bottlenecks, open questions, and future improvement options
+   - convert those findings into next experiments or decisions
+5) If the working question is about an experiment plan, focus on hypotheses, interventions, measurements, controls, and decision gates.
+6) If the working question is about process or scale-up, focus on operating variables, DOE structure, and transition criteria.
+7) Make each step actionable for a biotech program team, not generic advice.
+8) Include factual anchors, examples, dependencies, expected outcomes, and confidence (0..1).
+9) Include risks, mitigations, and measurable success criteria.
+10) Surface assumptions explicitly, especially where data is missing.
+11) If a structured research work template is provided, preserve its logic:
+   - keep the known vs unknown split visible
+   - honor explicit exclusions or boundary conditions from the user
+   - translate validation tracks into decision-useful experiments or analyses
+   - carry promising proposal seeds forward instead of restarting from zero
+12) When the template references analog compounds, neighboring conditions, or transferable examples, state the generalization assumptions explicitly.
+
+Return ONLY valid JSON using this exact shape:
+{{
+  "plan": {{
+    "plan_title": "string",
+    "strategy_summary": "string",
+    "success_criteria": ["string"],
+    "assumptions": ["string"],
+    "risks": [{{"risk": "string", "mitigation": "string"}}],
+    "steps": [
+      {{
+        "id": "step_1",
+        "title": "string",
+        "description": "string",
+        "why_this_step": "string",
+        "objective_link": "string",
+        "persona_link": "string",
+        "evidence_facts": ["string"],
+        "examples": ["string"],
+        "dependencies": ["step_1"],
+        "expected_outcome": "string",
+        "confidence": 0.75
+      }}
+    ]
+  }}
+}}
+
+Return ONLY valid JSON. No markdown, no code blocks."""
+
+    def get_persona_refactor_prompt(
+        self,
+        current_persona_json: Dict[str, Any],
+        current_summary: str,
+        interaction_events: List[Dict[str, Any]],
+    ) -> str:
+        compact_events = json.dumps(interaction_events[:200])
+        return f"""You are a persona-learning agent.
+
+Task: infer how the user actually behaves from interaction telemetry and explicit feedback,
+then output an updated persona JSON following the exact schema below.
+
+Current persona summary:
+{current_summary}
+
+Current persona JSON:
+{json.dumps(current_persona_json)}
+
+Interaction events (clicks, searches, objective choices, answers, feedback):
+{compact_events}
+
+Rules:
+1) Prefer explicit feedback over implicit behavior.
+2) Update only fields supported by event evidence.
+3) Keep unknown when weak evidence.
+4) Maintain consistency and provenance-friendly claims.
+
+Return ONLY valid JSON in this shape:
+{{
+  "persona": {{
+    "persona_id": "string",
+    "scope_id": "string",
+    "role": "string|unknown",
+    "domain_expertise": {{"biotech": "novice|intermediate|expert|unknown", "stats": "novice|intermediate|expert|unknown", "coding": "novice|intermediate|expert|unknown"}},
+    "goals": ["string"],
+    "constraints": {{"time_sensitivity": "low|medium|high|unknown", "compliance_posture": "strict|moderate|flexible|unknown", "risk_tolerance": "low|medium|high|unknown"}},
+    "preferences": {{"output_format": "steps|table|narrative|mixed|unknown", "citation_need": "low|medium|high|unknown", "verbosity": "low|medium|high|unknown"}},
+    "decision_style": "exploratory|confirmatory|production|unknown",
+    "trust_profile": {{"default_reliance": "low|medium|high|unknown", "verification_habits": ["string"]}},
+    "taboo_or_redlines": ["string"],
+    "key_quotes": [{{"quote": "string", "interview_id": 0}}],
+    "evidence": {{"support": [{{"claim": "string", "interview_id": 0, "span_hint": "event"}}]}}
+  }},
+  "learning_summary": "string"
+}}
+
+Return JSON only."""
 
 # Global Ollama client
 ollama = OllamaClient()

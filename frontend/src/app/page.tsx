@@ -1,879 +1,919 @@
 'use client';
 
-import React, { useState } from 'react';
-import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { useEffect, useRef, useState } from 'react';
 
-// API types - matching backend models
-interface Objective {
-  id: string;
-  title: string;
-  subtitle: string;
-  definition: string;
-  signals: string[];
-  facet_questions: string[];
-  exemplar_answer: string;
-}
+import { ModeBackdrop } from '@/features/biotech-workspace/components/ModeBackdrop';
+import { ObjectiveClusteringSection } from '@/features/biotech-workspace/components/ObjectiveClusteringSection';
+import { ProjectLandingShell } from '@/features/biotech-workspace/components/ProjectLandingShell';
+import { ProjectOverview } from '@/features/biotech-workspace/components/ProjectOverview';
+import { QueryAlignmentSection } from '@/features/biotech-workspace/components/QueryAlignmentSection';
+import { WorkingDraftSection } from '@/features/biotech-workspace/components/WorkingDraftSection';
+import { WorkflowStateSidebar } from '@/features/biotech-workspace/components/WorkflowStateSidebar';
+import { WorkspaceHeader } from '@/features/biotech-workspace/components/WorkspaceHeader';
+import {
+  clusterObjectives,
+  createProject,
+  deleteProject,
+  fetchExecutionRun,
+  fetchLatestExecutionRun,
+  fetchProjectLiterature,
+  fetchProjects,
+  fetchWorkspaceState,
+  generateProjectPlan,
+  saveWorkspaceState,
+  startExecutionRun,
+} from '@/features/biotech-workspace/lib/api';
+import {
+  buildPlanningReasoningNotes,
+  classNames,
+  createEmptyResearchWorkTemplate,
+  defaultFocusQuestion,
+  getModeVisualKey,
+  inferObjectiveFrame,
+  scorePersonaForObjective,
+} from '@/features/biotech-workspace/lib/utils';
+import type {
+  AgenticPlan,
+  JudgmentCall,
+  ObjectiveCluster,
+  PlanStep,
+  ProjectExecutionEvent,
+  ProjectExecutionRun,
+  Project,
+  ProjectFormState,
+  ResearchWorkTemplate,
+  StatusState,
+} from '@/features/biotech-workspace/types';
 
-interface EvidenceItem {
-  id: string;
-  type: string;
-  title: string;
-  snippet: string;
-  source_ref: string;
-  score: number;
-}
+type FlowStep = 'collaborator' | 'query' | 'objective' | 'workspace';
 
-interface ObjectivesResponse {
-  objectives: Objective[];
-  global_questions: string[];
-}
+export default function BiotechProjectWorkspace() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const routeProjectIdRaw = searchParams.get('projectId') || '';
+  const routePersonaIdRaw = searchParams.get('personaId') || '';
+  const parsedRouteProjectId = Number(routeProjectIdRaw);
+  const parsedRoutePersonaId = Number(routePersonaIdRaw);
+  const routeProjectId = routeProjectIdRaw && Number.isFinite(parsedRouteProjectId) ? parsedRouteProjectId : '';
+  const routePersonaId = routePersonaIdRaw && Number.isFinite(parsedRoutePersonaId) ? parsedRoutePersonaId : '';
 
-interface AugmentResponse {
-  evidence_items: EvidenceItem[];
-  augmented_answer?: string;
-}
-
-interface FinalizeResponse {
-  final_answer: string;
-  assumptions: string[];
-  next_questions: string[];
-}
-
-interface PlanRisk {
-  risk: string;
-  mitigation: string;
-}
-
-interface PlanStep {
-  id: string;
-  title: string;
-  description: string;
-  why_this_step: string;
-  objective_link: string;
-  persona_link: string;
-  evidence_facts: string[];
-  examples: string[];
-  dependencies: string[];
-  expected_outcome: string;
-  confidence: number;
-}
-
-interface AgenticPlan {
-  plan_title: string;
-  strategy_summary: string;
-  success_criteria: string[];
-  assumptions: string[];
-  risks: PlanRisk[];
-  steps: PlanStep[];
-}
-
-interface GeneratePlanResponse {
-  plan: AgenticPlan;
-}
-
-interface PersonaItem {
-  id: number;
-  name: string;
-  scope: string;
-}
-
-// API client
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
-async function generateObjectives(query: string, context?: string, k: number = 5, personaId?: number): Promise<ObjectivesResponse> {
-  const response = await fetch(`${API_BASE}/objectives`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, context, k, persona_id: personaId })
-  });
-  if (!response.ok) throw new Error('Failed to generate objectives');
-  return response.json();
-}
-
-async function augmentWithContext(query: string, objectiveId: string, objectiveDefinition: string, contextBlob: string, personaId?: number): Promise<AugmentResponse> {
-  const response = await fetch(`${API_BASE}/augment`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, objective_id: objectiveId, objective_definition: objectiveDefinition, context_blob: contextBlob, persona_id: personaId })
-  });
-  if (!response.ok) throw new Error('Failed to augment with context');
-  return response.json();
-}
-
-async function finalizeAnswer(query: string, objective: Objective, answers: Record<string, string>, contextBlob?: string, evidenceItems?: EvidenceItem[], personaId?: number): Promise<FinalizeResponse> {
-  const response = await fetch(`${API_BASE}/finalize`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, objective, answers, context_blob: contextBlob, evidence_items: evidenceItems, persona_id: personaId })
-  });
-  if (!response.ok) throw new Error('Failed to finalize answer');
-  return response.json();
-}
-
-async function generateAgenticPlan(
-  query: string,
-  objective: Objective,
-  personaId: number,
-  facetAnswers: Record<string, string>,
-  contextBlob?: string
-): Promise<GeneratePlanResponse> {
-  const response = await fetch(`${API_BASE}/api/plans/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      query,
-      objective,
-      persona_id: personaId,
-      facet_answers: facetAnswers,
-      context_blob: contextBlob,
-    }),
-  });
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail || 'Failed to generate agentic plan');
-  }
-  return response.json();
-}
-
-// Original UI components and styling patterns
-function classNames(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(' ');
-}
-
-function Pill({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center rounded-full border border-neutral-200 bg-neutral-50 px-2 py-0.5 text-xs text-neutral-700">
-      {children}
-    </span>
-  );
-}
-
-function SectionTitle({ title, subtitle }: { title: string; subtitle?: string }) {
-  return (
-    <div className="mb-3">
-      <div className="text-sm font-semibold text-neutral-900">{title}</div>
-      {subtitle ? <div className="text-xs text-neutral-600">{subtitle}</div> : null}
-    </div>
-  );
-}
-
-function LoadingSpinner() {
-  return (
-    <div className="flex items-center justify-center py-8">
-      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-neutral-900"></div>
-    </div>
-  );
-}
-
-export default function SECIQueryExplorer() {
-  // State
-  const [query, setQuery] = useState('best breakfast options');
-  const [contextBlob, setContextBlob] = useState('');
-  const [objectives, setObjectives] = useState<Objective[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<number | ''>('');
+  const [selectedPersonaId, setSelectedPersonaId] = useState<number | ''>('');
+  const [activeFlowStep, setActiveFlowStep] = useState<FlowStep>(routePersonaId !== '' ? 'query' : 'collaborator');
+  const [focusQuestion, setFocusQuestion] = useState('');
+  const [objectiveClusters, setObjectiveClusters] = useState<ObjectiveCluster[]>([]);
+  const [selectedObjectiveId, setSelectedObjectiveId] = useState('');
   const [globalQuestions, setGlobalQuestions] = useState<string[]>([]);
-  const [selectedObjective, setSelectedObjective] = useState<Objective | null>(null);
-  const [facetAnswers, setFacetAnswers] = useState<Record<string, string>>({});
-  const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>([]);
-  const [augmentedAnswer, setAugmentedAnswer] = useState<string>('');
-  const [finalAnswer, setFinalAnswer] = useState<FinalizeResponse | null>(null);
+  const [objectiveAnswers, setObjectiveAnswers] = useState<Record<string, string>>({});
+  const [globalQuestionAnswers, setGlobalQuestionAnswers] = useState<Record<string, string>>({});
+  const [clarifyingAnswers, setClarifyingAnswers] = useState<Record<string, string>>({});
+  const [reasoningNotes, setReasoningNotes] = useState('');
+  const [researchWorkTemplate, setResearchWorkTemplate] = useState<ResearchWorkTemplate>(createEmptyResearchWorkTemplate());
   const [agenticPlan, setAgenticPlan] = useState<AgenticPlan | null>(null);
-  const [selectedPlanStepId, setSelectedPlanStepId] = useState<string>('');
-  const [personas, setPersonas] = useState<PersonaItem[]>([]);
-  const [personaId, setPersonaId] = useState<number | ''>('');
-  
-  // Loading states
-  const [loadingObjectives, setLoadingObjectives] = useState(false);
-  const [loadingAugment, setLoadingAugment] = useState(false);
-  const [loadingFinalize, setLoadingFinalize] = useState(false);
+  const [executionRun, setExecutionRun] = useState<ProjectExecutionRun | null>(null);
+  const [executionEvents, setExecutionEvents] = useState<ProjectExecutionEvent[]>([]);
+  const [selectedPlanStepId, setSelectedPlanStepId] = useState('');
+  const [loadingProjects, setLoadingProjects] = useState(true);
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [deletingProjectId, setDeletingProjectId] = useState<number | null>(null);
+  const [loadingObjectiveClusters, setLoadingObjectiveClusters] = useState(false);
   const [loadingPlan, setLoadingPlan] = useState(false);
+  const [startingExecution, setStartingExecution] = useState(false);
+  const [fetchingLiterature, setFetchingLiterature] = useState(false);
+  const [literatureToolStatus, setLiteratureToolStatus] = useState<string | null>(null);
+  const [literatureObjectiveLens, setLiteratureObjectiveLens] = useState<string | null>(null);
+  const [literatureProcessingSummary, setLiteratureProcessingSummary] = useState<string | null>(null);
+  const [literatureElicitationQuestions, setLiteratureElicitationQuestions] = useState<string[]>([]);
+  const [literatureElicitationAnswers, setLiteratureElicitationAnswers] = useState<Record<string, string>>({});
+  const [loadingWorkspace, setLoadingWorkspace] = useState(false);
+  const [collaboratorPickerCollapsed, setCollaboratorPickerCollapsed] = useState(false);
+  const [objectivePickerCollapsed, setObjectivePickerCollapsed] = useState(false);
+  const [workspaceReadyForSave, setWorkspaceReadyForSave] = useState(false);
+  const [workspaceSaveState, setWorkspaceSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [workspaceUpdatedAt, setWorkspaceUpdatedAt] = useState<string | null>(null);
+  const [status, setStatus] = useState<StatusState | null>(null);
+  const querySectionRef = useRef<HTMLDivElement | null>(null);
+  const objectiveSectionRef = useRef<HTMLDivElement | null>(null);
+  const draftSectionRef = useRef<HTMLDivElement | null>(null);
+  const [form, setForm] = useState<ProjectFormState>({
+    name: '',
+    end_product: '',
+    target_host: 'Saccharomyces cerevisiae',
+    project_goal: '',
+    raw_material_focus: '',
+    notes: '',
+  });
 
-  // Generate objectives
-  const handleGenerateObjectives = async () => {
-    setLoadingObjectives(true);
+  const selectedProject =
+    selectedProjectId === '' ? null : projects.find((project) => project.id === Number(selectedProjectId)) || null;
+  const selectedPersona =
+    selectedProject && selectedPersonaId !== ''
+      ? selectedProject.personas.find((persona) => persona.persona_id === Number(selectedPersonaId)) || null
+      : null;
+  const selectedObjective = objectiveClusters.find((objective) => objective.id === selectedObjectiveId) || null;
+  const workingQuestionText = focusQuestion.trim() || selectedProject?.project_goal || '';
+  const selectedObjectiveLens = selectedObjective
+    ? [selectedObjective.title, selectedObjective.definition, ...selectedObjective.signals].join(' ')
+    : '';
+  const activeObjectiveFrame = selectedObjective ? inferObjectiveFrame(selectedObjectiveLens) : null;
+  const currentModeTitle = selectedObjective ? selectedObjective.title : 'Neutral workspace';
+  const currentModeDescription = selectedObjective
+    ? selectedObjective.definition
+    : 'Choose an objective mode after aligning the query with a collaborator. The selected mode becomes the active workspace setting.';
+  const modeVisualKey = selectedObjective ? getModeVisualKey(selectedObjective.title) : 'general';
+  const rankedPersonas = selectedProject
+    ? [...selectedProject.personas]
+        .map((persona) => ({ persona, score: scorePersonaForObjective(persona, workingQuestionText) }))
+        .sort((a, b) => b.score - a.score || a.persona.name.localeCompare(b.persona.name))
+    : [];
+  const topRecommendedPersona = rankedPersonas[0]?.persona || null;
+  const workspaceStatusMessage = loadingWorkspace
+    ? 'Loading saved workspace...'
+    : workspaceSaveState === 'saving'
+      ? 'Saving workspace...'
+      : workspaceSaveState === 'saved'
+        ? `Workspace saved${workspaceUpdatedAt ? ` at ${new Date(workspaceUpdatedAt).toLocaleString()}` : ''}.`
+        : workspaceSaveState === 'error'
+          ? 'Workspace save failed. Changes stay local until the next successful save.'
+          : 'Workspace changes are kept per project persona.';
+  const modeStudioTone: Record<string, string> = {
+    general: 'border-slate-200/90 bg-white/78',
+    evidence: 'border-sky-200/80 bg-[linear-gradient(135deg,rgba(239,246,255,0.78),rgba(255,255,255,0.74))]',
+    data: 'border-indigo-200/80 bg-[linear-gradient(135deg,rgba(238,242,255,0.8),rgba(255,255,255,0.74))]',
+    experiment: 'border-emerald-200/80 bg-[linear-gradient(135deg,rgba(236,253,245,0.82),rgba(255,251,235,0.72))]',
+    process: 'border-cyan-200/80 bg-[linear-gradient(135deg,rgba(236,254,255,0.8),rgba(255,255,255,0.74))]',
+    economics: 'border-amber-200/80 bg-[linear-gradient(135deg,rgba(255,251,235,0.82),rgba(255,255,255,0.74))]',
+    sourcing: 'border-lime-200/80 bg-[linear-gradient(135deg,rgba(247,254,231,0.82),rgba(255,251,235,0.72))]',
+    recovery: 'border-fuchsia-200/80 bg-[linear-gradient(135deg,rgba(250,245,255,0.82),rgba(255,255,255,0.74))]',
+  };
+  const modePageTone: Record<string, string> = {
+    general: 'bg-emerald-50/20',
+    evidence: 'bg-sky-50/50',
+    data: 'bg-indigo-50/45',
+    experiment: 'bg-emerald-50/50',
+    process: 'bg-cyan-50/50',
+    economics: 'bg-amber-50/45',
+    sourcing: 'bg-lime-50/45',
+    recovery: 'bg-fuchsia-50/45',
+  };
+  const scrollToSection = (target: React.RefObject<HTMLDivElement | null>) => {
+    window.requestAnimationFrame(() => {
+      target.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  };
+
+  const loadProjects = async (preferredProjectId?: number) => {
+    setLoadingProjects(true);
     try {
-      const response = await generateObjectives(query, contextBlob || undefined, 5, personaId === '' ? undefined : Number(personaId));
-      setObjectives(response.objectives);
-      setGlobalQuestions(response.global_questions);
-      setSelectedObjective(null);
-      setFacetAnswers({});
-      setEvidenceItems([]);
-      setAugmentedAnswer('');
-      setFinalAnswer(null);
-      setAgenticPlan(null);
-      setSelectedPlanStepId('');
+      const data = await fetchProjects();
+      const rows = data.projects || [];
+      setProjects(rows);
+      setSelectedProjectId((current) => {
+        if (preferredProjectId && rows.some((project) => project.id === preferredProjectId)) {
+          return preferredProjectId;
+        }
+        if (routeProjectId !== '' && rows.some((project) => project.id === Number(routeProjectId))) {
+          return Number(routeProjectId);
+        }
+        if (current !== '' && rows.some((project) => project.id === Number(current))) {
+          return current;
+        }
+        return '';
+      });
     } catch (error) {
-      console.error('Error generating objectives:', error);
-      alert('Failed to generate objectives. Please check if the backend is running.');
+      setProjects([]);
+      setSelectedProjectId('');
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load projects' });
     } finally {
-      setLoadingObjectives(false);
+      setLoadingProjects(false);
     }
   };
 
-  // Select objective
-  const handleSelectObjective = (objective: Objective) => {
-    setSelectedObjective(objective);
-    setFacetAnswers({});
-    setEvidenceItems([]);
-    setAugmentedAnswer('');
-    setFinalAnswer(null);
+  useEffect(() => {
+    loadProjects().catch(() => {});
+  }, [routeProjectId]);
+
+  useEffect(() => {
+    if (routeProjectId === '') {
+      setSelectedProjectId('');
+      return;
+    }
+    setSelectedProjectId(routeProjectId);
+  }, [routeProjectId]);
+
+  useEffect(() => {
+    if (!selectedProject) {
+      setSelectedPersonaId('');
+      return;
+    }
+
+    setSelectedPersonaId((current) => {
+      if (routePersonaId !== '' && selectedProject.personas.some((persona) => persona.persona_id === Number(routePersonaId))) {
+        return Number(routePersonaId);
+      }
+      if (current !== '' && selectedProject.personas.some((persona) => persona.persona_id === Number(current))) {
+        return current;
+      }
+      return '';
+    });
+  }, [selectedProject, routePersonaId]);
+
+  useEffect(() => {
+    if (!selectedPersona) {
+      setCollaboratorPickerCollapsed(false);
+    }
+  }, [selectedPersona?.persona_id]);
+
+  useEffect(() => {
+    if (!selectedProject || selectedPersonaId === '') {
+      return;
+    }
+
+    const currentProjectId = searchParams.get('projectId') || '';
+    const currentPersonaId = searchParams.get('personaId') || '';
+    const nextProjectId = String(selectedProject.id);
+    const nextPersonaId = String(selectedPersonaId);
+
+    if (currentProjectId === nextProjectId && currentPersonaId === nextPersonaId) {
+      return;
+    }
+
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('projectId', nextProjectId);
+    params.set('personaId', nextPersonaId);
+    router.replace(`/?${params.toString()}`, { scroll: false });
+  }, [router, searchParams, selectedProject?.id, selectedPersonaId]);
+
+  useEffect(() => {
     setAgenticPlan(null);
     setSelectedPlanStepId('');
+    setObjectiveClusters([]);
+    setSelectedObjectiveId('');
+    setGlobalQuestions([]);
+    setObjectiveAnswers({});
+    setGlobalQuestionAnswers({});
+    setClarifyingAnswers({});
+    setReasoningNotes('');
+    setResearchWorkTemplate(createEmptyResearchWorkTemplate());
+    setWorkspaceUpdatedAt(null);
+    setWorkspaceReadyForSave(false);
+    setWorkspaceSaveState('idle');
+    setObjectivePickerCollapsed(false);
+    setExecutionRun(null);
+    setExecutionEvents([]);
+    setLiteratureToolStatus(null);
+    setLiteratureObjectiveLens(null);
+    setLiteratureProcessingSummary(null);
+    setLiteratureElicitationQuestions([]);
+    setLiteratureElicitationAnswers({});
+    setActiveFlowStep(selectedPersonaId === '' ? 'collaborator' : 'query');
+  }, [selectedProjectId, selectedPersonaId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadWorkspace = async () => {
+      if (!selectedProject || !selectedPersona || selectedPersonaId === '') {
+        return;
+      }
+
+      setLoadingWorkspace(true);
+      try {
+        const response = await fetchWorkspaceState(selectedProject.id, Number(selectedPersonaId));
+        if (cancelled) return;
+
+        if (response.state) {
+          const nextFocusQuestion = response.state.focus_question || defaultFocusQuestion(selectedProject, selectedPersona);
+          setFocusQuestion(nextFocusQuestion);
+          setClarifyingAnswers(response.state.clarifying_answers || {});
+          setReasoningNotes(response.state.reasoning_notes || '');
+          setResearchWorkTemplate(response.state.work_template || createEmptyResearchWorkTemplate(nextFocusQuestion));
+          setAgenticPlan(response.state.plan || null);
+          setSelectedPlanStepId(response.state.selected_step_id || response.state.plan?.steps[0]?.id || '');
+          setWorkspaceUpdatedAt(response.state.updated_at || null);
+          setWorkspaceSaveState('saved');
+        } else {
+          const nextFocusQuestion = defaultFocusQuestion(selectedProject, selectedPersona);
+          setFocusQuestion(nextFocusQuestion);
+          setClarifyingAnswers({});
+          setReasoningNotes('');
+          setResearchWorkTemplate(createEmptyResearchWorkTemplate(nextFocusQuestion));
+          setAgenticPlan(null);
+          setSelectedPlanStepId('');
+          setWorkspaceUpdatedAt(null);
+          setWorkspaceSaveState('idle');
+        }
+      } catch (error) {
+        if (cancelled) return;
+        const nextFocusQuestion = defaultFocusQuestion(selectedProject, selectedPersona);
+        setFocusQuestion(nextFocusQuestion);
+        setClarifyingAnswers({});
+        setReasoningNotes('');
+        setResearchWorkTemplate(createEmptyResearchWorkTemplate(nextFocusQuestion));
+        setAgenticPlan(null);
+        setSelectedPlanStepId('');
+        setWorkspaceUpdatedAt(null);
+        setWorkspaceSaveState('error');
+        setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load saved workspace' });
+      } finally {
+        if (!cancelled) {
+          setLoadingWorkspace(false);
+          setWorkspaceReadyForSave(true);
+        }
+      }
+    };
+
+    loadWorkspace().catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProject?.id, selectedPersona?.persona_id, selectedPersonaId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadExecutionRun = async () => {
+      if (!selectedProject || !selectedPersona || selectedPersonaId === '') {
+        return;
+      }
+      try {
+        const response = await fetchLatestExecutionRun(selectedProject.id, Number(selectedPersonaId));
+        if (cancelled) return;
+        setExecutionRun(response.run || null);
+        setExecutionEvents(response.events || []);
+      } catch {
+        if (!cancelled) {
+          setExecutionRun(null);
+          setExecutionEvents([]);
+        }
+      }
+    };
+
+    loadExecutionRun().catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProject?.id, selectedPersona?.persona_id, selectedPersonaId]);
+
+  useEffect(() => {
+    if (!workspaceReadyForSave || loadingWorkspace || !selectedProject || !selectedPersona || selectedPersonaId === '') {
+      return;
+    }
+
+    const timer = window.setTimeout(async () => {
+      setWorkspaceSaveState('saving');
+      try {
+        const response = await saveWorkspaceState(selectedProject.id, Number(selectedPersonaId), {
+          focus_question: focusQuestion,
+          clarifying_answers: clarifyingAnswers,
+          reasoning_notes: reasoningNotes,
+          work_template: researchWorkTemplate,
+          plan: agenticPlan,
+          selected_step_id: selectedPlanStepId || undefined,
+        });
+        setWorkspaceUpdatedAt(response.state?.updated_at || new Date().toISOString());
+        setWorkspaceSaveState('saved');
+      } catch {
+        setWorkspaceSaveState('error');
+      }
+    }, 900);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    workspaceReadyForSave,
+    loadingWorkspace,
+    selectedProject?.id,
+    selectedPersona?.persona_id,
+    selectedPersonaId,
+    focusQuestion,
+    JSON.stringify(clarifyingAnswers),
+    reasoningNotes,
+    JSON.stringify(researchWorkTemplate),
+    JSON.stringify(agenticPlan),
+    selectedPlanStepId,
+  ]);
+
+  useEffect(() => {
+    if (!selectedProject || !executionRun || !['queued', 'running'].includes(executionRun.status)) {
+      return;
+    }
+
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await fetchExecutionRun(selectedProject.id, executionRun.id);
+        setExecutionRun(response.run || null);
+        setExecutionEvents(response.events || []);
+        if (response.run?.final_work_template) {
+          setResearchWorkTemplate(response.run.final_work_template);
+        }
+        if (response.run?.final_plan) {
+          setAgenticPlan(response.run.final_plan);
+          setSelectedPlanStepId(response.run.final_plan.steps[0]?.id || '');
+        }
+        if (response.run?.status === 'completed') {
+          setStatus({ type: 'success', message: 'Agentic execution completed and the workspace was refreshed.' });
+        } else if (response.run?.status === 'failed') {
+          setStatus({ type: 'error', message: response.run.error_message || 'Agentic execution failed.' });
+        }
+      } catch {
+        // Keep the existing UI state if polling fails briefly.
+      }
+    }, 2000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [selectedProject?.id, executionRun?.id, executionRun?.status]);
+
+  const handleCreateProject = async () => {
+    if (!form.name.trim() || !form.end_product.trim()) {
+      setStatus({ type: 'error', message: 'Project name and end product are required.' });
+      return;
+    }
+
+    setCreatingProject(true);
+    setStatus({ type: 'info', message: 'Creating project and generating project-specific collaborators...' });
+    try {
+      const response = await createProject(form);
+      await loadProjects(response.project.id);
+      router.push(`/?projectId=${response.project.id}`);
+      setSelectedProjectId(response.project.id);
+      setSelectedPersonaId('');
+      setActiveFlowStep('collaborator');
+      setFocusQuestion(defaultFocusQuestion(response.project, null));
+      setReasoningNotes('');
+      setStatus({
+        type: 'success',
+        message: `Created ${response.project.name} with ${response.created_persona_ids.length} project collaborators.`,
+      });
+    } catch (error) {
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to create project' });
+    } finally {
+      setCreatingProject(false);
+    }
+  };
+
+  const handleOpenProject = (projectId: number) => {
+    router.push(`/?projectId=${projectId}`);
+    setSelectedProjectId(projectId);
+  };
+
+  const handleDeleteProject = async (project: Project) => {
+    const confirmed = window.confirm(`Delete "${project.name}" and its saved project workspace?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingProjectId(project.id);
+    setStatus({ type: 'info', message: `Deleting ${project.name}...` });
+    try {
+      await deleteProject(project.id);
+      if (selectedProjectId === project.id) {
+        router.push('/');
+        setSelectedProjectId('');
+        setSelectedPersonaId('');
+      }
+      await loadProjects();
+      setStatus({ type: 'success', message: `Deleted ${project.name}.` });
+    } catch (error) {
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to delete project' });
+    } finally {
+      setDeletingProjectId(null);
+    }
+  };
+
+  const handleReturnToLanding = () => {
+    router.push('/');
+  };
+
+  const handleClusterObjectives = async () => {
+    const queryText = focusQuestion.trim() || selectedProject?.project_goal?.trim() || '';
+    if (!queryText) {
+      setStatus({ type: 'error', message: 'Add a working question before clustering objective angles.' });
+      return;
+    }
+
+    setLoadingObjectiveClusters(true);
+    setStatus({ type: 'info', message: 'Clustering objective angles for this project question...' });
+    try {
+      const response = await clusterObjectives({
+        query: queryText,
+        context: [
+          selectedProject?.project_goal ? `Project goal: ${selectedProject.project_goal}` : '',
+          selectedProject?.end_product ? `End product: ${selectedProject.end_product}` : '',
+          selectedProject?.target_host ? `Target host: ${selectedProject.target_host}` : '',
+          selectedProject?.raw_material_focus ? `Cost or sourcing context: ${selectedProject.raw_material_focus}` : '',
+          selectedProject?.notes ? `Project context: ${selectedProject.notes}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        k: 4,
+        persona_id: selectedPersona?.persona_id,
+      });
+      setObjectiveClusters(response.objectives || []);
+      setGlobalQuestions(response.global_questions || []);
+      setSelectedObjectiveId('');
+      setObjectiveAnswers({});
+      setGlobalQuestionAnswers({});
+      setObjectivePickerCollapsed(false);
+      setActiveFlowStep('objective');
+      scrollToSection(objectiveSectionRef);
+      setStatus({
+        type: 'success',
+        message: response.objectives?.length
+          ? 'Objective clusters generated. Pick the mode that should govern the next workspace.'
+          : 'No objective clusters were returned.',
+      });
+    } catch (error) {
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to cluster objectives' });
+    } finally {
+      setLoadingObjectiveClusters(false);
+    }
+  };
+
+  const handleSelectPersona = (personaId: number) => {
+    setSelectedPersonaId(personaId);
+    setCollaboratorPickerCollapsed(true);
+    setActiveFlowStep('query');
+    scrollToSection(querySectionRef);
+  };
+
+  const handleSelectObjective = (objectiveId: string) => {
+    setSelectedObjectiveId(objectiveId);
+    setObjectivePickerCollapsed(true);
+    setActiveFlowStep('workspace');
+    scrollToSection(draftSectionRef);
+  };
+
+  const handleRefineQuery = () => {
+    setActiveFlowStep('query');
+    scrollToSection(querySectionRef);
+  };
+
+  const handleChooseAnotherCollaborator = () => {
+    setActiveFlowStep('collaborator');
+    setCollaboratorPickerCollapsed(false);
+    setObjectivePickerCollapsed(false);
+    scrollToSection(querySectionRef);
+  };
+
+  const handleChooseAnotherObjective = () => {
+    setActiveFlowStep('objective');
+    setObjectivePickerCollapsed(false);
+    scrollToSection(objectiveSectionRef);
+  };
+
+  const handleOpenDraftWorkspace = () => {
+    setActiveFlowStep(selectedObjective ? 'workspace' : 'objective');
+    scrollToSection(selectedObjective ? draftSectionRef : objectiveSectionRef);
   };
 
   const handleGeneratePlan = async () => {
-    if (!selectedObjective) return;
-    if (personaId === '') {
-      alert('Select a persona before generating a plan.');
+    if (!selectedProject || !selectedPersona || selectedPersonaId === '') {
+      setStatus({ type: 'error', message: 'Select a project persona before generating a plan.' });
+      return;
+    }
+    if (!selectedObjective) {
+      setStatus({ type: 'error', message: 'Select an objective mode before generating a draft.' });
       return;
     }
 
     setLoadingPlan(true);
+    setStatus({ type: 'info', message: `Generating a ${selectedObjective.title.toLowerCase()} draft with ${selectedPersona.name}...` });
     try {
-      const response = await generateAgenticPlan(
-        query,
+      const effectiveReasoningNotes = buildPlanningReasoningNotes({
+        reasoningNotes,
         selectedObjective,
-        Number(personaId),
-        facetAnswers,
-        contextBlob || undefined
-      );
+        objectiveAnswers,
+        globalQuestions,
+        globalQuestionAnswers,
+      });
+      const response = await generateProjectPlan(selectedProject.id, {
+        persona_id: Number(selectedPersonaId),
+        focus_question: focusQuestion,
+        notes: selectedProject.notes || undefined,
+        clarifying_answers: clarifyingAnswers,
+        reasoning_notes: effectiveReasoningNotes || reasoningNotes,
+        work_template: researchWorkTemplate,
+      });
       setAgenticPlan(response.plan);
-      if (response.plan.steps.length > 0) {
-        setSelectedPlanStepId(response.plan.steps[0].id);
-      }
+      setSelectedPlanStepId(response.plan.steps[0]?.id || '');
+      setWorkspaceSaveState('saved');
+      setActiveFlowStep('workspace');
+      scrollToSection(draftSectionRef);
+      setStatus({ type: 'success', message: `${activeObjectiveFrame?.draftLabel || 'Working Draft'} generated and workspace saved.` });
     } catch (error) {
-      console.error('Error generating plan:', error);
-      alert(error instanceof Error ? error.message : 'Failed to generate plan');
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to generate project draft' });
     } finally {
       setLoadingPlan(false);
     }
   };
 
-  const updatePlanStep = (stepId: string, patch: Partial<PlanStep>) => {
-    setAgenticPlan((prev) => {
-      if (!prev) return prev;
+  const handleFetchLiterature = async () => {
+    if (!selectedProject || !selectedPersona || selectedPersonaId === '') {
+      setStatus({ type: 'error', message: 'Select a project persona before fetching literature.' });
+      return;
+    }
+    const queryText = researchWorkTemplate.initial_query.trim() || focusQuestion.trim() || selectedProject.project_goal.trim();
+    if (!queryText) {
+      setStatus({ type: 'error', message: 'Add an initial query or working question before fetching literature.' });
+      return;
+    }
+
+    setFetchingLiterature(true);
+    setLiteratureToolStatus('Calling search_pubmed...');
+    setStatus({ type: 'info', message: 'Fetching literature with search_pubmed...' });
+    try {
+      const response = await fetchProjectLiterature(selectedProject.id, {
+        persona_id: Number(selectedPersonaId),
+        query: queryText,
+        objective_id: selectedObjective?.id,
+        objective_title: selectedObjective?.title,
+        objective_definition: selectedObjective?.definition,
+        objective_signals: selectedObjective?.signals,
+        max_results: 5,
+        existing_citations: researchWorkTemplate.literature_findings.map((item) => item.citation).filter(Boolean),
+      });
+      const existing = new Set(researchWorkTemplate.literature_findings.map((item) => item.citation.trim().toLowerCase()).filter(Boolean));
+      const newFindings = (response.findings || []).filter((item) => !existing.has(item.citation.trim().toLowerCase()));
+      setResearchWorkTemplate((current) => ({
+        ...current,
+        initial_query: current.initial_query.trim() || queryText,
+        literature_findings: [...current.literature_findings, ...newFindings],
+      }));
+      setLiteratureObjectiveLens(response.objective_lens || selectedObjective?.title || null);
+      setLiteratureProcessingSummary(response.processing_summary || null);
+      setLiteratureElicitationQuestions(response.elicitation_questions || []);
+      setLiteratureElicitationAnswers({});
+      const trace = response.tool_trace;
+      const traceMessage = `${trace.tool_name} returned ${trace.result_count} result${trace.result_count === 1 ? '' : 's'} for "${trace.query}". Added ${newFindings.length}.`;
+      setLiteratureToolStatus(traceMessage);
+      setStatus({ type: 'success', message: traceMessage });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to fetch literature';
+      setLiteratureToolStatus(message);
+      setStatus({ type: 'error', message });
+    } finally {
+      setFetchingLiterature(false);
+    }
+  };
+
+  const handleLiteratureElicitationAnswerChange = (question: string, value: string) => {
+    setLiteratureElicitationAnswers((current) => ({
+      ...current,
+      [question]: value,
+    }));
+  };
+
+  const handleCaptureLiteratureTacitAnswer = (question: string) => {
+    const answer = (literatureElicitationAnswers[question] || '').trim();
+    if (!answer) {
+      return;
+    }
+
+    const stableId = `tacit_${question.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 48)}`;
+    const nextJudgment: JudgmentCall = {
+      id: stableId,
+      stance: answer,
+      rationale: `Response to literature-processing prompt: ${question}`,
+      implication: 'Use this tacit judgment when prioritizing gaps, boundary conditions, and experiment-plan proposals.',
+    };
+    setResearchWorkTemplate((current) => {
+      const existing = current.judgment_calls.some((item) => item.id === stableId);
       return {
-        ...prev,
-        steps: prev.steps.map((s) => (s.id === stepId ? { ...s, ...patch } : s)),
+        ...current,
+        judgment_calls: existing
+          ? current.judgment_calls.map((item) => (item.id === stableId ? nextJudgment : item))
+          : [...current.judgment_calls, nextJudgment],
+      };
+    });
+    setStatus({ type: 'success', message: 'Captured your literature judgment in the work template.' });
+  };
+
+  const handleRefreshExecution = async () => {
+    if (!selectedProject || !selectedPersona || selectedPersonaId === '') {
+      return;
+    }
+    try {
+      const response = executionRun
+        ? await fetchExecutionRun(selectedProject.id, executionRun.id)
+        : await fetchLatestExecutionRun(selectedProject.id, Number(selectedPersonaId));
+      setExecutionRun(response.run || null);
+      setExecutionEvents(response.events || []);
+      if (response.run?.final_work_template) {
+        setResearchWorkTemplate(response.run.final_work_template);
+      }
+      if (response.run?.final_plan) {
+        setAgenticPlan(response.run.final_plan);
+        setSelectedPlanStepId(response.run.final_plan.steps[0]?.id || '');
+      }
+    } catch (error) {
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to refresh execution run' });
+    }
+  };
+
+  const handleStartExecution = async () => {
+    if (!selectedProject || !selectedPersona || selectedPersonaId === '') {
+      setStatus({ type: 'error', message: 'Select a project persona before starting execution.' });
+      return;
+    }
+    if (!selectedObjective) {
+      setStatus({ type: 'error', message: 'Select an objective mode before starting execution.' });
+      return;
+    }
+
+    setStartingExecution(true);
+    setStatus({ type: 'info', message: `Starting agentic execution for ${selectedObjective.title.toLowerCase()}...` });
+    try {
+      const effectiveReasoningNotes = buildPlanningReasoningNotes({
+        reasoningNotes,
+        selectedObjective,
+        objectiveAnswers,
+        globalQuestions,
+        globalQuestionAnswers,
+      });
+      const response = await startExecutionRun(selectedProject.id, {
+        persona_id: Number(selectedPersonaId),
+        focus_question: focusQuestion,
+        notes: selectedProject.notes || undefined,
+        clarifying_answers: clarifyingAnswers,
+        reasoning_notes: effectiveReasoningNotes || reasoningNotes,
+        work_template: researchWorkTemplate,
+        objective_id: selectedObjective.id,
+        objective_title: selectedObjective.title,
+        objective_definition: selectedObjective.definition,
+        objective_signals: selectedObjective.signals,
+      });
+      setExecutionRun(response.run || null);
+      setExecutionEvents(response.events || []);
+      scrollToSection(draftSectionRef);
+      setStatus({ type: 'success', message: 'Agentic execution started. The workspace will update as the run completes.' });
+    } catch (error) {
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to start execution run' });
+    } finally {
+      setStartingExecution(false);
+    }
+  };
+
+  const updatePlanStep = (stepId: string, patch: Partial<PlanStep>) => {
+    setAgenticPlan((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        steps: current.steps.map((step) => (step.id === stepId ? { ...step, ...patch } : step)),
       };
     });
   };
 
-  // Augment with context
-  const handleAugmentWithContext = async () => {
-    if (!selectedObjective || !contextBlob) return;
-    
-    setLoadingAugment(true);
-    try {
-      const response = await augmentWithContext(
-        query,
-        selectedObjective.id,
-        selectedObjective.definition,
-        contextBlob,
-        personaId === '' ? undefined : Number(personaId)
-      );
-      setEvidenceItems(response.evidence_items);
-      setAugmentedAnswer(response.augmented_answer || '');
-    } catch (error) {
-      console.error('Error augmenting with context:', error);
-      alert('Failed to augment with context.');
-    } finally {
-      setLoadingAugment(false);
-    }
+  const handleFormChange = (field: keyof ProjectFormState, value: string) => {
+    setForm((current) => ({ ...current, [field]: value }));
   };
-
-  // Finalize answer
-  const handleFinalizeAnswer = async () => {
-    if (!selectedObjective) return;
-    
-    setLoadingFinalize(true);
-    try {
-      const response = await finalizeAnswer(
-        query, 
-        selectedObjective, 
-        facetAnswers, 
-        contextBlob || undefined, 
-        evidenceItems.length > 0 ? evidenceItems : undefined,
-        personaId === '' ? undefined : Number(personaId)
-      );
-      setFinalAnswer(response);
-    } catch (error) {
-      console.error('Error finalizing answer:', error);
-      alert('Failed to finalize answer.');
-    } finally {
-      setLoadingFinalize(false);
-    }
-  };
-
-  // Reset
-  const handleReset = () => {
-    setObjectives([]);
-    setGlobalQuestions([]);
-    setSelectedObjective(null);
-    setFacetAnswers({});
-    setEvidenceItems([]);
-    setAugmentedAnswer('');
-    setFinalAnswer(null);
-    setContextBlob('');
-    setAgenticPlan(null);
-    setSelectedPlanStepId('');
-  };
-
-  React.useEffect(() => {
-    const load = async () => {
-      const res = await fetch(`${API_BASE}/api/personas`, { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = await res.json();
-      setPersonas(data.personas || []);
-    };
-    load();
-  }, []);
-
-  // Calculate objective stats (like original topicStats)
-  const objectiveStats = objectives.reduce((acc, obj) => {
-    // For display purposes, we'll count signals as a proxy for "candidates"
-    acc[obj.id] = obj.signals.length;
-    return acc;
-  }, {} as Record<string, number>);
-
-  // Order objectives by signal count (like original topicCardOrder)
-  const objectiveCardOrder = [...objectives].sort((a, b) => b.signals.length - a.signals.length);
-
-  // Filter objectives (for now, just show all)
-  const filteredObjectives = objectives;
-
-  // Synthesize preview (like original synthesizedPreview)
-  const synthesizedPreview = selectedObjective ? [
-    `Interpretation: ${selectedObjective.subtitle}`,
-    `Definition: ${selectedObjective.definition}`,
-    `Common signals: ${selectedObjective.signals.slice(0, 5).join(', ')}`,
-    `Facet questions: ${selectedObjective.facet_questions.length}`,
-  ].join('\n') : null;
-
-  const selectedPlanStep = agenticPlan?.steps.find((step) => step.id === selectedPlanStepId) || null;
 
   return (
-    <div className="min-h-screen bg-neutral-50 p-6">
-      <div className="mx-auto max-w-6xl space-y-6">
-        {/* Header - using original styling */}
-        <div className="rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-            <div>
-              <div className="text-lg font-semibold text-neutral-900">
-                Underspecified Query Topic Explorer (SECI-PoC)
-              </div>
-              <div className="text-sm text-neutral-600">
-                Type a query → generate diverse objective clusters → select objective → clarify with facet questions → augment with context → synthesize final answer.
-              </div>
-            </div>
+    <div className={classNames('relative min-h-screen overflow-hidden p-6 text-slate-950 transition-colors duration-700', modePageTone[modeVisualKey] || modePageTone.general)}>
+      <ModeBackdrop modeKey={modeVisualKey} />
+      <div className="relative z-10 mx-auto max-w-7xl space-y-6">
+        <WorkspaceHeader selectedProject={Boolean(selectedProject)} onReturnToLanding={handleReturnToLanding} status={status} />
 
-            <div className="flex gap-2">
-              <Link
-                href="/reports"
-                className="rounded-xl border border-neutral-200 bg-white px-4 py-2 text-sm font-semibold text-neutral-900 hover:bg-neutral-50"
-              >
-                Reports
-              </Link>
-              <Link
-                href="/personas"
-                className="rounded-xl border border-neutral-200 bg-white px-4 py-2 text-sm font-semibold text-neutral-900 hover:bg-neutral-50"
-              >
-                Personas
-              </Link>
-              <button
-                onClick={handleGenerateObjectives}
-                disabled={loadingObjectives || !query.trim()}
-                className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {loadingObjectives ? 'Generating...' : 'Generate objectives'}
-              </button>
-              <button
-                onClick={handleReset}
-                className="rounded-xl border border-neutral-200 bg-white px-4 py-2 text-sm font-semibold text-neutral-900 hover:bg-neutral-50"
-              >
-                Reset
-              </button>
-            </div>
-          </div>
-
-          {/* Query input */}
-          <div className="mt-5 grid gap-3 md:grid-cols-12 md:items-center">
-            <div className="md:col-span-8">
-              <label className="mb-1 block text-xs font-medium text-neutral-700">User query</label>
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="e.g., best breakfast options"
-                className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none ring-0 focus:border-neutral-300"
-              />
-              <div className="mt-1 text-xs text-neutral-500">
-                SECI PoC: objectives generated via LLM, facet questions for clarification, context augmentation available.
-              </div>
-            </div>
-            <div className="md:col-span-4">
-              <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3">
-                <div className="text-xs font-medium text-neutral-700">Status</div>
-                <div className="mt-1 text-sm text-neutral-900">
-                  {objectives.length > 0 ? (
-                    <>
-                      Objectives: <span className="font-semibold">{objectives.length}</span> · Facet Questions:{' '}
-                      <span className="font-semibold">{selectedObjective?.facet_questions.length || 0}</span>
-                    </>
-                  ) : (
-                    'No objectives generated.'
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Context blob input */}
-          <div className="mt-3">
-            <label className="mb-1 block text-xs font-medium text-neutral-700">Persona (optional)</label>
-            <select
-              value={personaId}
-              onChange={(e) => setPersonaId(e.target.value === '' ? '' : Number(e.target.value))}
-              className="mb-3 w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none ring-0 focus:border-neutral-300"
-            >
-              <option value="">None</option>
-              {personas.map((p) => (
-                <option key={p.id} value={p.id}>{p.name} ({p.scope})</option>
-              ))}
-            </select>
-            <label className="mb-1 block text-xs font-medium text-neutral-700">Context evidence (optional)</label>
-            <textarea
-              value={contextBlob}
-              onChange={(e) => setContextBlob(e.target.value)}
-              placeholder="Paste relevant context, papers, data, or notes here..."
-              rows={4}
-              className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none ring-0 focus:border-neutral-300"
+        {!selectedProject ? (
+          <ProjectLandingShell
+            form={form}
+            onFormChange={handleFormChange}
+            onCreateProject={handleCreateProject}
+            creatingProject={creatingProject}
+            loadingProjects={loadingProjects}
+            projects={projects}
+            selectedProjectId={selectedProjectId}
+            onOpenProject={handleOpenProject}
+            onDeleteProject={handleDeleteProject}
+            deletingProjectId={deletingProjectId}
+            onRefreshProjects={() => {
+              loadProjects().catch(() => {});
+            }}
+          />
+        ) : (
+          <main className="grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
+            <WorkflowStateSidebar
+              selectedProject={selectedProject}
+              focusQuestion={focusQuestion}
+              selectedPersona={selectedPersona}
+              selectedObjective={selectedObjective}
+              agenticPlan={agenticPlan}
+              workspaceStatusMessage={workspaceStatusMessage}
+              onEditQuestion={handleRefineQuery}
+              onChangeCollaborator={handleChooseAnotherCollaborator}
+              onChangeObjective={handleChooseAnotherObjective}
+              onOpenDraft={handleOpenDraftWorkspace}
             />
-          </div>
-        </div>
 
-        {/* Main grid - using original layout */}
-        <div className="grid gap-6 lg:grid-cols-12">
-          {/* Left: Objectives */}
-          <div className="lg:col-span-5">
-            <div className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm">
-              <SectionTitle title="Objective clusters" subtitle="Click one to explore and clarify" />
+            <div className="min-w-0 space-y-5">
+              <ProjectOverview selectedProject={selectedProject} />
 
-              {loadingObjectives ? (
-                <LoadingSpinner />
-              ) : objectives.length === 0 ? (
-                <div className="text-center py-8 text-sm text-neutral-600">
-                  Generate objectives to see clusters
-                </div>
-              ) : (
-                <div className="grid gap-3">
-                  {objectiveCardOrder.map((obj) => {
-                    const count = objectiveStats[obj.id] ?? 0;
-                    const active = selectedObjective?.id === obj.id;
-                    const disabled = !objectives.length || count === 0;
-
-                    return (
-                      <button
-                        key={obj.id}
-                        disabled={disabled}
-                        onClick={() => handleSelectObjective(obj)}
-                        className={classNames(
-                          'rounded-2xl border p-4 text-left transition',
-                          disabled
-                            ? 'cursor-not-allowed border-neutral-200 bg-neutral-50 opacity-60'
-                            : active
-                            ? 'border-neutral-900 bg-neutral-50'
-                            : 'border-neutral-200 bg-white hover:bg-neutral-50'
-                        )}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="text-sm font-semibold text-neutral-900">{obj.title}</div>
-                            <div className="mt-1 text-xs text-neutral-600">{obj.subtitle}</div>
-                          </div>
-                          <div className="flex flex-col items-end gap-2">
-                            <Pill>{count} signals</Pill>
-                            {active ? <Pill>Selected</Pill> : null}
-                          </div>
-                        </div>
-
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {obj.signals.slice(0, 4).map((signal) => (
-                            <Pill key={signal}>{signal}</Pill>
-                          ))}
-                        </div>
-                      </button>
-                    );
-                  })}
+              {(activeFlowStep === 'collaborator' || activeFlowStep === 'query') && (
+                <div ref={querySectionRef} className="scroll-mt-28">
+                  <QueryAlignmentSection
+                    activeStep={activeFlowStep === 'collaborator' ? 'collaborator' : 'query'}
+                    focusQuestion={focusQuestion}
+                    onFocusQuestionChange={setFocusQuestion}
+                    rankedPersonas={rankedPersonas}
+                    selectedPersonaId={selectedPersonaId}
+                    onSelectPersona={handleSelectPersona}
+                    selectedPersona={selectedPersona}
+                    topRecommendedPersona={topRecommendedPersona}
+                    clarifyingAnswers={clarifyingAnswers}
+                    onClarifyingAnswerChange={(question, value) =>
+                      setClarifyingAnswers((current) => ({
+                        ...current,
+                        [question]: value,
+                      }))
+                    }
+                    onSubmitQuery={handleClusterObjectives}
+                    submittingQuery={loadingObjectiveClusters}
+                  />
                 </div>
               )}
-            </div>
-          </div>
 
-          {/* Right: Details */}
-          <div className="lg:col-span-7">
-            <div className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm">
-              <SectionTitle
-                title={selectedObjective ? `Unroll: ${selectedObjective.title}` : 'Select an objective to unroll'}
-                subtitle={
-                  selectedObjective
-                    ? 'View the objective definition, facet questions, and synthesize final answer.'
-                    : objectives.length > 0
-                    ? 'Objectives are ready. Choose one on the left.'
-                    : 'Generate objectives first.'
-                }
-              />
-
-              {/* Roll-up panel */}
-              <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="text-sm font-semibold text-neutral-900">Rolled-up interpretation</div>
-                  {selectedObjective ? (
-                    <button
-                      onClick={() => setSelectedObjective(null)}
-                      className="rounded-xl border border-neutral-200 bg-white px-3 py-1.5 text-xs font-semibold text-neutral-900 hover:bg-neutral-50"
-                    >
-                      Clear selection
-                    </button>
-                  ) : null}
-                </div>
-                <div className="mt-2 whitespace-pre-wrap text-sm text-neutral-800">
-                  {synthesizedPreview ?? (
-                    <span className="text-neutral-600">
-                      Pick an objective to see its rolled-up interpretation.
-                    </span>
+              {(activeFlowStep === 'objective' || activeFlowStep === 'workspace') && (
+                <section
+                  ref={objectiveSectionRef}
+                  className={classNames(
+                    'scroll-mt-28 rounded-[2rem] border p-5 shadow-[0_40px_120px_-60px_rgba(15,23,42,0.36)] backdrop-blur-md transition-all duration-700',
+                    modeStudioTone[modeVisualKey] || modeStudioTone.general
                   )}
-                </div>
-              </div>
-
-              {/* Facet questions */}
-              {selectedObjective && (
-                <div className="mt-4">
-                  <div className="text-sm font-semibold text-neutral-900">Facet clarifying questions</div>
-                  <div className="mt-2 grid gap-2">
-                    {selectedObjective.facet_questions.map((question, index) => (
-                      <div key={index} className="rounded-xl border border-neutral-200 bg-white p-3 text-sm text-neutral-800">
-                        {question}
-                      </div>
-                    ))}
-                  </div>
-                  
-                  {/* Interactive facet answers */}
-                  <div className="mt-3">
-                    <div className="text-xs font-medium text-neutral-700 mb-2">Your answers:</div>
-                    {selectedObjective.facet_questions.map((question, index) => (
-                      <div key={index} className="mb-2">
-                        <input
-                          type="text"
-                          placeholder={`Answer: ${question}`}
-                          value={facetAnswers[question] || ''}
-                          onChange={(e) => setFacetAnswers(prev => ({ ...prev, [question]: e.target.value }))}
-                          className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none ring-0 focus:border-neutral-300"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Agentic plan */}
-              {selectedObjective && (
-                <div className="mt-4 rounded-2xl border border-sky-200 bg-gradient-to-br from-sky-50 via-white to-cyan-50 p-4">
-                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                    <div>
-                      <div className="text-sm font-semibold text-slate-900">Agentic Plan Visualizer</div>
-                      <div className="text-xs text-slate-600">
-                        Build an objective-aligned plan with persona-specific rationale, facts, and editable steps.
-                      </div>
-                    </div>
-                    <button
-                      onClick={handleGeneratePlan}
-                      disabled={loadingPlan || personaId === ''}
-                      className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {loadingPlan ? 'Planning...' : 'Generate Plan'}
-                    </button>
-                  </div>
-
-                  {personaId === '' && (
-                    <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                      Select a persona to generate a plan tailored to user behavior and decision style.
-                    </div>
+                >
+                  {activeFlowStep === 'objective' && (
+                  <ObjectiveClusteringSection
+                    objectiveClusters={objectiveClusters}
+                    selectedObjective={selectedObjective}
+                    selectedObjectiveId={selectedObjectiveId}
+                    objectivePickerCollapsed={objectivePickerCollapsed}
+                    onSelectObjective={handleSelectObjective}
+                    onGenerateModes={handleClusterObjectives}
+                    loadingObjectiveClusters={loadingObjectiveClusters}
+                    canGenerateModes={Boolean(selectedPersona && workingQuestionText)}
+                    objectiveAnswers={objectiveAnswers}
+                    onObjectiveAnswerChange={(question, value) =>
+                      setObjectiveAnswers((current) => ({
+                        ...current,
+                        [question]: value,
+                      }))
+                    }
+                    globalQuestions={globalQuestions}
+                    globalQuestionAnswers={globalQuestionAnswers}
+                    onGlobalQuestionChange={(question, value) =>
+                      setGlobalQuestionAnswers((current) => ({
+                        ...current,
+                        [question]: value,
+                      }))
+                    }
+                    onSetObjectivePickerCollapsed={setObjectivePickerCollapsed}
+                  />
                   )}
 
-                  {agenticPlan && (
-                    <div className="mt-4 space-y-4">
-                      <div className="rounded-xl border border-slate-200 bg-white p-3">
-                        <div className="text-sm font-semibold text-slate-900">{agenticPlan.plan_title}</div>
-                        <div className="mt-1 text-xs text-slate-700">{agenticPlan.strategy_summary}</div>
-                        {agenticPlan.success_criteria.length > 0 && (
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {agenticPlan.success_criteria.map((criterion, idx) => (
-                              <span key={`${criterion}-${idx}`} className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-800">
-                                {criterion}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="grid gap-3 lg:grid-cols-2">
-                        <div className="space-y-2">
-                          {agenticPlan.steps.map((step, index) => {
-                            const active = selectedPlanStepId === step.id;
-                            return (
-                              <button
-                                key={step.id}
-                                onClick={() => setSelectedPlanStepId(step.id)}
-                                className={classNames(
-                                  'w-full rounded-xl border p-3 text-left transition',
-                                  active
-                                    ? 'border-sky-400 bg-sky-50 shadow-sm'
-                                    : 'border-slate-200 bg-white hover:bg-slate-50'
-                                )}
-                              >
-                                <div className="flex items-start justify-between gap-2">
-                                  <div>
-                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-700">Step {index + 1}</div>
-                                    <div className="text-sm font-semibold text-slate-900">{step.title}</div>
-                                  </div>
-                                  <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
-                                    {Math.round((step.confidence || 0) * 100)}%
-                                  </span>
-                                </div>
-                                <div className="mt-1 line-clamp-2 text-xs text-slate-700">{step.description}</div>
-                                {step.dependencies.length > 0 && (
-                                  <div className="mt-2 flex flex-wrap gap-1">
-                                    {step.dependencies.map((dep) => (
-                                      <span key={dep} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-700">
-                                        depends on {dep}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                              </button>
-                            );
-                          })}
-                        </div>
-
-                        <div className="rounded-xl border border-slate-200 bg-white p-3">
-                          {!selectedPlanStep ? (
-                            <div className="text-xs text-slate-600">Pick a step to inspect and edit rationale.</div>
-                          ) : (
-                            <div className="space-y-2">
-                              <input
-                                value={selectedPlanStep.title}
-                                onChange={(e) => updatePlanStep(selectedPlanStep.id, { title: e.target.value })}
-                                className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm font-semibold text-slate-900"
-                              />
-                              <textarea
-                                value={selectedPlanStep.description}
-                                onChange={(e) => updatePlanStep(selectedPlanStep.id, { description: e.target.value })}
-                                rows={3}
-                                className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
-                              />
-                              <div className="rounded-lg border border-violet-200 bg-violet-50 p-2">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-violet-800">Why this step was chosen</div>
-                                <textarea
-                                  value={selectedPlanStep.why_this_step}
-                                  onChange={(e) => updatePlanStep(selectedPlanStep.id, { why_this_step: e.target.value })}
-                                  rows={3}
-                                  className="mt-1 w-full rounded-lg border border-violet-200 bg-white px-2 py-1.5 text-xs text-slate-800"
-                                />
-                              </div>
-                              <div className="grid gap-2 md:grid-cols-2">
-                                <div>
-                                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Objective link</div>
-                                  <textarea
-                                    value={selectedPlanStep.objective_link}
-                                    onChange={(e) => updatePlanStep(selectedPlanStep.id, { objective_link: e.target.value })}
-                                    rows={2}
-                                    className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
-                                  />
-                                </div>
-                                <div>
-                                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Persona link</div>
-                                  <textarea
-                                    value={selectedPlanStep.persona_link}
-                                    onChange={(e) => updatePlanStep(selectedPlanStep.id, { persona_link: e.target.value })}
-                                    rows={2}
-                                    className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
-                                  />
-                                </div>
-                              </div>
-                              <div>
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Evidence / facts (one per line)</div>
-                                <textarea
-                                  value={selectedPlanStep.evidence_facts.join('\n')}
-                                  onChange={(e) =>
-                                    updatePlanStep(selectedPlanStep.id, {
-                                      evidence_facts: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean),
-                                    })
-                                  }
-                                  rows={3}
-                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
-                                />
-                              </div>
-                              <div>
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Examples (one per line)</div>
-                                <textarea
-                                  value={selectedPlanStep.examples.join('\n')}
-                                  onChange={(e) =>
-                                    updatePlanStep(selectedPlanStep.id, {
-                                      examples: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean),
-                                    })
-                                  }
-                                  rows={3}
-                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
-                                />
-                              </div>
-                              <div>
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Expected outcome</div>
-                                <textarea
-                                  value={selectedPlanStep.expected_outcome}
-                                  onChange={(e) => updatePlanStep(selectedPlanStep.id, { expected_outcome: e.target.value })}
-                                  rows={2}
-                                  className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-800"
-                                />
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      {agenticPlan.risks.length > 0 && (
-                        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3">
-                          <div className="text-xs font-semibold uppercase tracking-wide text-rose-800">Risk radar</div>
-                          <div className="mt-2 space-y-2">
-                            {agenticPlan.risks.map((r, idx) => (
-                              <div key={`${r.risk}-${idx}`} className="rounded-lg border border-rose-200 bg-white p-2">
-                                <div className="text-xs font-semibold text-rose-900">{r.risk}</div>
-                                <div className="text-xs text-slate-700">Mitigation: {r.mitigation}</div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                  {activeFlowStep === 'workspace' && (
+                <div ref={draftSectionRef} className="scroll-mt-28">
+                  <WorkingDraftSection
+                    selectedObjective={selectedObjective}
+                    currentModeTitle={currentModeTitle}
+                    currentModeDescription={currentModeDescription}
+                    onChooseAnotherObjective={handleChooseAnotherObjective}
+                    focusQuestion={focusQuestion}
+                    researchWorkTemplate={researchWorkTemplate}
+                    onResearchWorkTemplateChange={setResearchWorkTemplate}
+                    onFetchLiterature={handleFetchLiterature}
+                    fetchingLiterature={fetchingLiterature}
+                    literatureToolStatus={literatureToolStatus}
+                    literatureObjectiveLens={literatureObjectiveLens}
+                    literatureProcessingSummary={literatureProcessingSummary}
+                    literatureElicitationQuestions={literatureElicitationQuestions}
+                    literatureElicitationAnswers={literatureElicitationAnswers}
+                    onLiteratureElicitationAnswerChange={handleLiteratureElicitationAnswerChange}
+                    onCaptureLiteratureTacitAnswer={handleCaptureLiteratureTacitAnswer}
+                    reasoningNotes={reasoningNotes}
+                    onReasoningNotesChange={setReasoningNotes}
+                    agenticPlan={agenticPlan}
+                    selectedPlanStepId={selectedPlanStepId}
+                    onSelectPlanStep={setSelectedPlanStepId}
+                    onUpdatePlanStep={updatePlanStep}
+                    onGeneratePlan={handleGeneratePlan}
+                    loadingPlan={loadingPlan}
+                    executionRun={executionRun}
+                    executionEvents={executionEvents}
+                    onStartExecution={handleStartExecution}
+                    onRefreshExecution={handleRefreshExecution}
+                    startingExecution={startingExecution}
+                  />
+                </div>
                   )}
-                </div>
-              )}
-
-              {/* Context augmentation */}
-              {selectedObjective && contextBlob && (
-                <div className="mt-4">
-                  <button
-                    onClick={handleAugmentWithContext}
-                    disabled={loadingAugment}
-                    className="w-full rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm font-semibold text-neutral-900 hover:bg-neutral-50 disabled:opacity-50"
-                  >
-                    {loadingAugment ? 'Augmenting...' : 'Augment with context'}
-                  </button>
-                </div>
-              )}
-
-              {/* Evidence items */}
-              {evidenceItems.length > 0 && (
-                <div className="mt-4">
-                  <div className="text-sm font-semibold text-neutral-900">Extracted evidence</div>
-                  <div className="mt-2 space-y-2">
-                    {evidenceItems.map((evidence) => (
-                      <div key={evidence.id} className="rounded-xl border border-neutral-200 bg-neutral-50 p-3">
-                        <div className="text-xs font-medium text-neutral-700">{evidence.title}</div>
-                        <div className="mt-1 text-sm text-neutral-800">{evidence.snippet}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Exemplar/Augmented answer preview */}
-              {selectedObjective && (
-                <div className="mt-4">
-                  <div className="text-sm font-semibold text-neutral-900">Answer preview</div>
-                  <div className="mt-2 rounded-xl border border-neutral-200 bg-neutral-50 p-3">
-                    <div className="text-sm text-neutral-800">
-                      {augmentedAnswer || selectedObjective.exemplar_answer}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Finalize button */}
-              {selectedObjective && (
-                <div className="mt-4">
-                  <button
-                    onClick={handleFinalizeAnswer}
-                    disabled={loadingFinalize}
-                    className="w-full rounded-xl bg-neutral-900 px-4 py-3 text-sm font-semibold text-white shadow-sm hover:bg-neutral-800 disabled:opacity-50"
-                  >
-                    {loadingFinalize ? 'Finalizing...' : 'Generate final answer'}
-                  </button>
-                </div>
-              )}
-
-              {/* Final answer */}
-              {finalAnswer && (
-                <div className="mt-4">
-                  <div className="text-sm font-semibold text-neutral-900">Final answer</div>
-                  <div className="mt-2 rounded-xl border border-neutral-200 bg-neutral-50 p-4">
-                    <div className="text-sm text-neutral-900 mb-3">{finalAnswer.final_answer}</div>
-                    
-                    {finalAnswer.assumptions.length > 0 && (
-                      <div className="mt-3">
-                        <div className="text-xs font-medium text-neutral-700">Assumptions</div>
-                        <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-neutral-600">
-                          {finalAnswer.assumptions.map((assumption, index) => (
-                            <li key={index}>{assumption}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {finalAnswer.next_questions.length > 0 && (
-                      <div className="mt-3">
-                        <div className="text-xs font-medium text-neutral-700">Next questions</div>
-                        <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-neutral-600">
-                          {finalAnswer.next_questions.map((question, index) => (
-                            <li key={index}>{question}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                </div>
+                </section>
               )}
             </div>
-          </div>
-        </div>
-
-        {/* Global questions */}
-        {globalQuestions.length > 0 && (
-          <div className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm">
-            <SectionTitle title="Global clarifying questions" subtitle="Cross-cutting questions for any objective" />
-            <div className="grid gap-2 md:grid-cols-2">
-              {globalQuestions.map((question, index) => (
-                <div key={index} className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-800">
-                  {question}
-                </div>
-              ))}
-            </div>
-          </div>
+          </main>
         )}
-
-        {/* Footer: next step */}
-        <div className="rounded-2xl border border-neutral-200 bg-white p-4">
-          <div className="text-sm font-semibold text-neutral-900">SECI Framework Implementation</div>
-          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-neutral-700">
-            <li>Socialization: Generate multiple objective hypotheses via LLM</li>
-            <li>Externalization: Render objectives + facet questions explicitly in UI</li>
-            <li>Combination: Augment selected objective with external evidence (context blob)</li>
-            <li>Internalization: Store selected objective + answers to reuse as prior (SQLite)</li>
-          </ul>
-        </div>
-
-        {/* Minimal note */}
-        <div className="text-xs text-neutral-500">
-          SECI PoC uses LLM-generated objectives and facet questions. Swap in your embedding-based clusters by mapping each objective to a cluster id, then render clusters dynamically.
-        </div>
       </div>
     </div>
   );
