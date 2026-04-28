@@ -148,6 +148,34 @@ export interface FetchProjectLiteratureResponse {
   elicitation_questions: string[];
 }
 
+export interface TacitMemoryItem {
+  id: string;
+  label: string;
+  inference: string;
+  evidence: string[];
+  confidence: number;
+  status: 'inferred' | 'confirmed' | 'rejected' | 'edited';
+  reviewer_note?: string | null;
+}
+
+export interface WorkspaceMemory {
+  workspace_key: string;
+  scope: string;
+  explicit_state: Record<string, unknown>;
+  tacit_state: TacitMemoryItem[];
+  handoff_summary: string;
+  updated_at?: string | null;
+}
+
+export interface WorkspaceMemoryResponse {
+  memory?: WorkspaceMemory | null;
+}
+
+export interface InferWorkspaceMemoryResponse {
+  tacit_state: TacitMemoryItem[];
+  handoff_summary: string;
+}
+
 export interface ProjectWorkspaceState {
   project_id: number;
   persona_id: number;

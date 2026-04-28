@@ -1,4 +1,4 @@
-import sqlite3
+﻿import sqlite3
 import json
 import hashlib
 import os
@@ -6,9 +6,21 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from models import LogEventRequest
 
+_UNSET = object()
+
 class DatabaseManager:
     def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or os.getenv("DATABASE_PATH", "data/undspecified_queries.db")
+        if db_path:
+            resolved_path = db_path
+        else:
+            env_path = os.getenv("DATABASE_PATH")
+            if env_path:
+                resolved_path = env_path
+            else:
+                default_path = "data/unspecified_queries.db"
+                legacy_path = "data/undspecified_queries.db"
+                resolved_path = legacy_path if os.path.exists(legacy_path) else default_path
+        self.db_path = resolved_path
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.init_database()
 
@@ -98,6 +110,22 @@ class DatabaseManager:
         ''')
 
         cursor.execute('''
+            CREATE TABLE IF NOT EXISTS projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                scope_id TEXT,
+                end_product TEXT NOT NULL,
+                target_host TEXT NOT NULL DEFAULT 'Saccharomyces cerevisiae',
+                project_goal TEXT NOT NULL DEFAULT '',
+                raw_material_focus TEXT,
+                notes TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS interviews (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scope TEXT NOT NULL,
@@ -105,6 +133,82 @@ class DatabaseManager:
                 transcript_text TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 metadata_json TEXT
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS persona_refactor_state (
+                persona_id INTEGER PRIMARY KEY,
+                last_event_id INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(persona_id) REFERENCES personas(id)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                persona_id INTEGER,
+                objective_id TEXT,
+                query TEXT,
+                response_text TEXT,
+                rating INTEGER NOT NULL,
+                feedback_text TEXT,
+                metadata_json TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS project_workspace_state (
+                project_id INTEGER NOT NULL,
+                persona_id INTEGER NOT NULL,
+                focus_question TEXT,
+                clarifying_answers_json TEXT NOT NULL DEFAULT '{}',
+                reasoning_notes TEXT,
+                work_template_json TEXT,
+                plan_json TEXT,
+                selected_step_id TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (project_id, persona_id)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS project_execution_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                persona_id INTEGER NOT NULL,
+                run_kind TEXT NOT NULL DEFAULT 'agentic_execution',
+                status TEXT NOT NULL DEFAULT 'queued',
+                objective_id TEXT,
+                mode_label TEXT,
+                focus_question TEXT,
+                current_stage TEXT,
+                summary TEXT,
+                error_message TEXT,
+                input_json TEXT,
+                final_work_template_json TEXT,
+                final_plan_json TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                started_at DATETIME,
+                finished_at DATETIME
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS project_execution_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                stage_key TEXT,
+                title TEXT,
+                detail TEXT,
+                payload_json TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(run_id) REFERENCES project_execution_runs(id)
             )
         ''')
 
@@ -130,8 +234,33 @@ class DatabaseManager:
             ON personas(scope)
         ''')
 
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_scope
+            ON projects(scope_id)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_projects_status_updated
+            ON projects(status, updated_at)
+        ''')
+
         try:
             cursor.execute("ALTER TABLE personas ADD COLUMN identity_key TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE personas ADD COLUMN project_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE project_workspace_state ADD COLUMN reasoning_notes TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE project_workspace_state ADD COLUMN work_template_json TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -148,6 +277,31 @@ class DatabaseManager:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_interviews_scope
             ON interviews(scope)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_personas_project_id
+            ON personas(project_id)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_project_workspace_project_persona
+            ON project_workspace_state(project_id, persona_id)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_project_execution_runs_project_persona
+            ON project_execution_runs(project_id, persona_id, updated_at DESC)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_project_execution_runs_status
+            ON project_execution_runs(status, updated_at DESC)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_project_execution_events_run
+            ON project_execution_events(run_id, id ASC)
         ''')
 
         cursor.execute('''
@@ -170,7 +324,105 @@ class DatabaseManager:
         
         conn.commit()
         conn.close()
-    
+
+    def list_events(self, min_id: int = 0, limit: int = 500) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT id, event_type, payload, timestamp
+            FROM events
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            ''',
+            (min_id, limit),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        for row in rows:
+            row["payload"] = json.loads(row.get("payload") or "{}")
+        return rows
+
+    def get_persona_refactor_checkpoint(self, persona_id: int) -> int:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT last_event_id FROM persona_refactor_state WHERE persona_id = ?',
+            (persona_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return 0
+        return int(row[0] or 0)
+
+    def set_persona_refactor_checkpoint(self, persona_id: int, last_event_id: int):
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO persona_refactor_state(persona_id, last_event_id, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(persona_id)
+            DO UPDATE SET last_event_id=excluded.last_event_id, updated_at=CURRENT_TIMESTAMP
+            ''',
+            (persona_id, last_event_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def create_feedback(
+        self,
+        persona_id: Optional[int],
+        objective_id: Optional[str],
+        query: Optional[str],
+        response_text: Optional[str],
+        rating: int,
+        feedback_text: Optional[str],
+        metadata: Dict[str, Any],
+    ) -> int:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO feedback (persona_id, objective_id, query, response_text, rating, feedback_text, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (persona_id, objective_id, query, response_text, rating, feedback_text, json.dumps(metadata or {})),
+        )
+        feedback_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return int(feedback_id)
+
+    def list_feedback(self, persona_id: Optional[int] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        if persona_id is None:
+            cursor.execute(
+                '''
+                SELECT * FROM feedback
+                ORDER BY id DESC
+                LIMIT ?
+                ''',
+                (limit,),
+            )
+        else:
+            cursor.execute(
+                '''
+                SELECT * FROM feedback
+                WHERE persona_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                ''',
+                (persona_id, limit),
+            )
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        for row in rows:
+            row["metadata_json"] = json.loads(row.get("metadata_json") or "{}")
+        return rows
     def get_prior(self, query_signature: str) -> Optional[Dict[str, Any]]:
         """Retrieve prior information for a query signature."""
         conn = self._connect()
@@ -517,6 +769,340 @@ class DatabaseManager:
         conn.close()
         return int(interview_id)
 
+    def create_project(
+        self,
+        name: str,
+        end_product: str,
+        target_host: str,
+        project_goal: str,
+        raw_material_focus: Optional[str] = None,
+        notes: Optional[str] = None,
+        status: str = "active",
+        scope_id: Optional[str] = None,
+    ) -> int:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO projects (name, scope_id, end_product, target_host, project_goal, raw_material_focus, notes, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (name, scope_id, end_product, target_host, project_goal, raw_material_focus, notes, status),
+        )
+        project_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return int(project_id)
+
+    def update_project_scope(self, project_id: int, scope_id: str):
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE projects
+            SET scope_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ''',
+            (scope_id, project_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_project(self, project_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM projects WHERE id = ?', (project_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def list_projects(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        if status:
+            cursor.execute('SELECT * FROM projects WHERE status = ? ORDER BY updated_at DESC, id DESC', (status,))
+        else:
+            cursor.execute('SELECT * FROM projects ORDER BY updated_at DESC, id DESC')
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    def delete_project(self, project_id: int) -> bool:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM personas WHERE project_id = ?', (project_id,))
+        persona_ids = [int(r[0]) for r in cursor.fetchall()]
+
+        if persona_ids:
+            placeholders = ','.join(['?' for _ in persona_ids])
+            cursor.execute(f'DELETE FROM persona_refactor_state WHERE persona_id IN ({placeholders})', persona_ids)
+            cursor.execute(f'DELETE FROM feedback WHERE persona_id IN ({placeholders})', persona_ids)
+            cursor.execute(f'DELETE FROM project_workspace_state WHERE persona_id IN ({placeholders})', persona_ids)
+            cursor.execute(f'DELETE FROM personas WHERE id IN ({placeholders})', persona_ids)
+
+        cursor.execute('DELETE FROM project_workspace_state WHERE project_id = ?', (project_id,))
+        cursor.execute('DELETE FROM projects WHERE id = ?', (project_id,))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
+
+    def get_project_workspace_state(self, project_id: int, persona_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM project_workspace_state
+            WHERE project_id = ? AND persona_id = ?
+            ''',
+            (project_id, persona_id),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        payload = dict(row)
+        payload["clarifying_answers"] = json.loads(payload.get("clarifying_answers_json") or "{}")
+        payload["work_template"] = json.loads(payload.get("work_template_json") or "null")
+        payload["plan"] = json.loads(payload.get("plan_json") or "null")
+        return payload
+
+    def upsert_project_workspace_state(
+        self,
+        project_id: int,
+        persona_id: int,
+        focus_question: Optional[str],
+        clarifying_answers: Dict[str, Any],
+        reasoning_notes: Optional[str],
+        work_template: Optional[Dict[str, Any]],
+        plan: Optional[Dict[str, Any]],
+        selected_step_id: Optional[str],
+    ) -> Dict[str, Any]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO project_workspace_state (
+                project_id, persona_id, focus_question, clarifying_answers_json, reasoning_notes, work_template_json, plan_json, selected_step_id, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(project_id, persona_id)
+            DO UPDATE SET
+                focus_question=excluded.focus_question,
+                clarifying_answers_json=excluded.clarifying_answers_json,
+                reasoning_notes=excluded.reasoning_notes,
+                work_template_json=excluded.work_template_json,
+                plan_json=excluded.plan_json,
+                selected_step_id=excluded.selected_step_id,
+                updated_at=CURRENT_TIMESTAMP
+            ''',
+            (
+                project_id,
+                persona_id,
+                focus_question,
+                json.dumps(clarifying_answers or {}),
+                reasoning_notes,
+                json.dumps(work_template) if work_template is not None else None,
+                json.dumps(plan) if plan is not None else None,
+                selected_step_id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        state = self.get_project_workspace_state(project_id, persona_id)
+        if not state:
+            raise RuntimeError("Failed to persist project workspace state")
+        return state
+
+    def _hydrate_project_execution_run(self, row: sqlite3.Row) -> Dict[str, Any]:
+        payload = dict(row)
+        payload["input"] = json.loads(payload.get("input_json") or "{}")
+        payload["final_work_template"] = json.loads(payload.get("final_work_template_json") or "null")
+        payload["final_plan"] = json.loads(payload.get("final_plan_json") or "null")
+        return payload
+
+    def create_project_execution_run(
+        self,
+        *,
+        project_id: int,
+        persona_id: int,
+        run_kind: str,
+        objective_id: Optional[str],
+        mode_label: Optional[str],
+        focus_question: Optional[str],
+        input_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO project_execution_runs (
+                project_id, persona_id, run_kind, status, objective_id, mode_label, focus_question, input_json
+            )
+            VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)
+            ''',
+            (
+                project_id,
+                persona_id,
+                run_kind,
+                objective_id,
+                mode_label,
+                focus_question,
+                json.dumps(input_payload or {}),
+            ),
+        )
+        run_id = int(cursor.lastrowid)
+        conn.commit()
+        conn.close()
+        row = self.get_project_execution_run(run_id)
+        if not row:
+            raise RuntimeError("Failed to create execution run")
+        return row
+
+    def get_project_execution_run(self, run_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM project_execution_runs WHERE id = ?', (run_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return self._hydrate_project_execution_run(row)
+
+    def get_latest_project_execution_run(self, project_id: int, persona_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM project_execution_runs
+            WHERE project_id = ? AND persona_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            ''',
+            (project_id, persona_id),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return self._hydrate_project_execution_run(row)
+
+    def list_project_execution_events(self, run_id: int, after_id: int = 0) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM project_execution_events
+            WHERE run_id = ? AND id > ?
+            ORDER BY id ASC
+            ''',
+            (run_id, after_id),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        for row in rows:
+            row["payload"] = json.loads(row.get("payload_json") or "{}")
+        return rows
+
+    def append_project_execution_event(
+        self,
+        *,
+        run_id: int,
+        event_type: str,
+        stage_key: Optional[str],
+        title: str,
+        detail: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO project_execution_events (run_id, event_type, stage_key, title, detail, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''',
+            (run_id, event_type, stage_key, title, detail, json.dumps(payload or {})),
+        )
+        event_id = int(cursor.lastrowid)
+        conn.commit()
+        conn.close()
+        return event_id
+
+    def update_project_execution_run(
+        self,
+        run_id: int,
+        *,
+        status: Any = _UNSET,
+        current_stage: Any = _UNSET,
+        summary: Any = _UNSET,
+        error_message: Any = _UNSET,
+        final_work_template: Any = _UNSET,
+        final_plan: Any = _UNSET,
+        set_started: bool = False,
+        set_finished: bool = False,
+    ) -> Dict[str, Any]:
+        assignments: List[str] = []
+        params: List[Any] = []
+
+        if status is not _UNSET:
+            assignments.append("status = ?")
+            params.append(status)
+        if current_stage is not _UNSET:
+            assignments.append("current_stage = ?")
+            params.append(current_stage)
+        if summary is not _UNSET:
+            assignments.append("summary = ?")
+            params.append(summary)
+        if error_message is not _UNSET:
+            assignments.append("error_message = ?")
+            params.append(error_message)
+        if final_work_template is not _UNSET:
+            assignments.append("final_work_template_json = ?")
+            params.append(json.dumps(final_work_template) if final_work_template is not None else None)
+        if final_plan is not _UNSET:
+            assignments.append("final_plan_json = ?")
+            params.append(json.dumps(final_plan) if final_plan is not None else None)
+        if set_started:
+            assignments.append("started_at = COALESCE(started_at, CURRENT_TIMESTAMP)")
+        if set_finished:
+            assignments.append("finished_at = CURRENT_TIMESTAMP")
+
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            f'''
+            UPDATE project_execution_runs
+            SET {", ".join(assignments)}
+            WHERE id = ?
+            ''',
+            (*params, run_id),
+        )
+        conn.commit()
+        conn.close()
+        row = self.get_project_execution_run(run_id)
+        if not row:
+            raise RuntimeError("Failed to update execution run")
+        return row
+
+    def mark_incomplete_execution_runs_failed(self, message: str):
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE project_execution_runs
+            SET status = 'failed',
+                error_message = COALESCE(error_message, ?),
+                finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status IN ('queued', 'running')
+            ''',
+            (message,),
+        )
+        conn.commit()
+        conn.close()
+
     def get_interview_by_scope_path(self, scope: str, transcript_path: str) -> Optional[Dict[str, Any]]:
         conn = self._connect()
         cursor = conn.cursor()
@@ -564,16 +1150,18 @@ class DatabaseManager:
         last_summary: str,
         identity_key: Optional[str] = None,
         version: Optional[int] = None,
+        source: str = "interviews",
+        project_id: Optional[int] = None,
     ) -> int:
         conn = self._connect()
         cursor = conn.cursor()
         final_version = version if version is not None else 1
         cursor.execute(
             '''
-            INSERT INTO personas (name, scope, identity_key, source, persona_json, version, last_summary)
-            VALUES (?, ?, ?, 'interviews', ?, ?, ?)
+            INSERT INTO personas (name, scope, identity_key, source, persona_json, version, last_summary, project_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''',
-            (name, scope, identity_key, json.dumps(persona_json), final_version, last_summary),
+            (name, scope, identity_key, source, json.dumps(persona_json), final_version, last_summary, project_id),
         )
         persona_id = cursor.lastrowid
         conn.commit()
@@ -744,14 +1332,40 @@ class DatabaseManager:
     def delete_persona(self, persona_id: int):
         conn = self._connect()
         cursor = conn.cursor()
+        cursor.execute('DELETE FROM project_workspace_state WHERE persona_id = ?', (persona_id,))
         cursor.execute('DELETE FROM personas WHERE id = ?', (persona_id,))
         conn.commit()
         conn.close()
 
-    def list_personas(self, scope: Optional[str] = None) -> List[Dict[str, Any]]:
+    def clear_personas(self, scope: Optional[str] = None) -> int:
         conn = self._connect()
         cursor = conn.cursor()
+
         if scope:
+            cursor.execute('SELECT id FROM personas WHERE scope = ?', (scope,))
+        else:
+            cursor.execute('SELECT id FROM personas')
+        persona_ids = [int(r[0]) for r in cursor.fetchall()]
+
+        if not persona_ids:
+            conn.close()
+            return 0
+
+        placeholders = ','.join(['?' for _ in persona_ids])
+        cursor.execute(f'DELETE FROM persona_refactor_state WHERE persona_id IN ({placeholders})', persona_ids)
+        cursor.execute(f'DELETE FROM feedback WHERE persona_id IN ({placeholders})', persona_ids)
+        cursor.execute(f'DELETE FROM project_workspace_state WHERE persona_id IN ({placeholders})', persona_ids)
+        cursor.execute(f'DELETE FROM personas WHERE id IN ({placeholders})', persona_ids)
+
+        conn.commit()
+        conn.close()
+        return len(persona_ids)
+    def list_personas(self, scope: Optional[str] = None, project_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        if project_id is not None:
+            cursor.execute('SELECT * FROM personas WHERE project_id=? ORDER BY updated_at DESC', (project_id,))
+        elif scope:
             cursor.execute('SELECT * FROM personas WHERE scope=? ORDER BY updated_at DESC', (scope,))
         else:
             cursor.execute('SELECT * FROM personas ORDER BY updated_at DESC')

@@ -138,6 +138,32 @@ class InferWorkspaceMemoryResponse(BaseModel):
     tacit_state: List[TacitMemoryItem] = Field(default_factory=list)
     handoff_summary: str = ""
 
+
+class FeedbackRequest(BaseModel):
+    persona_id: Optional[int] = None
+    objective_id: Optional[str] = None
+    query: Optional[str] = None
+    response_text: Optional[str] = None
+    rating: int = Field(ge=1, le=5)
+    feedback_text: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class FeedbackResponse(BaseModel):
+    status: str
+
+
+class PersonaRefactorItem(BaseModel):
+    source_persona_id: int
+    new_persona_id: int
+    events_used: int
+    version: int
+
+
+class PersonaRefactorResponse(BaseModel):
+    updated: List[PersonaRefactorItem]
+    skipped: List[Dict[str, Any]] = Field(default_factory=list)
+
 class LogEventRequest(BaseModel):
     event_type: str
     payload: Dict[str, Any]
@@ -380,6 +406,9 @@ class PersonaPayload(BaseModel):
     taboo_or_redlines: List[str] = Field(default_factory=list)
     key_quotes: List[KeyQuote] = Field(default_factory=list, max_length=5)
     evidence: Dict[str, List[EvidenceReference]]
+    workflow_stage: Optional[str] = "general"
+    workflow_focus: List[str] = Field(default_factory=list)
+    project_context: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PersonaFromInterviewsRequest(BaseModel):
@@ -414,6 +443,7 @@ class PersonaResponse(BaseModel):
     id: int
     name: str
     scope: str
+    project_id: Optional[int] = None
     identity_key: Optional[str] = None
     source: str
     created_at: str
@@ -425,3 +455,296 @@ class PersonaResponse(BaseModel):
 
 class PersonaListResponse(BaseModel):
     personas: List[PersonaResponse]
+
+class PersonaChangeLogItem(BaseModel):
+    source_persona_id: int
+    new_persona_id: int
+    created_at: str
+    changes: List[str] = Field(default_factory=list)
+    reasons: List[str] = Field(default_factory=list)
+    supporting_events: Dict[str, int] = Field(default_factory=dict)
+
+
+class PersonaChangeLogResponse(BaseModel):
+    persona_id: int
+    items: List[PersonaChangeLogItem] = Field(default_factory=list)
+
+class PersonaBootstrapRequest(BaseModel):
+    scope_id: str = "default"
+    display_name: Optional[str] = None
+    profile_note: Optional[str] = None
+    goals: List[str] = Field(default_factory=list)
+    output_format: Optional[Literal["steps", "table", "narrative", "mixed", "unknown"]] = "unknown"
+    citation_need: Optional[Literal["low", "medium", "high", "unknown"]] = "unknown"
+    verbosity: Optional[Literal["low", "medium", "high", "unknown"]] = "unknown"
+    risk_tolerance: Optional[Literal["low", "medium", "high", "unknown"]] = "unknown"
+    decision_style: Optional[Literal["exploratory", "confirmatory", "production", "unknown"]] = "unknown"
+    seed_queries: List[str] = Field(default_factory=list)
+    seed_feedback: List[str] = Field(default_factory=list)
+
+
+class PersonaBootstrapResponse(BaseModel):
+    persona_id: int
+    name: str
+    version: int
+    seeded_events: int = 0
+
+class PersonaTemplateSummary(BaseModel):
+    template_id: str
+    name: str
+    tagline: str
+    description: str
+    starter_goals: List[str] = Field(default_factory=list)
+
+
+class PersonaTemplateListResponse(BaseModel):
+    templates: List[PersonaTemplateSummary] = Field(default_factory=list)
+
+
+class CreatePersonaFromTemplateRequest(BaseModel):
+    scope_id: str = "default"
+    template_id: str
+    custom_name: Optional[str] = None
+
+
+class CreatePersonaFromTemplateResponse(BaseModel):
+    persona_id: int
+    name: str
+    version: int
+    created: bool = True
+
+class ResetPersonasRequest(BaseModel):
+    scope_id: str = "default"
+
+
+class ResetPersonasResponse(BaseModel):
+    scope_id: str
+    removed_count: int = 0
+    created_persona_ids: List[int] = Field(default_factory=list)
+
+
+class ImportPersonaMarkdownRequest(BaseModel):
+    scope_id: str = "default"
+    name: Optional[str] = None
+    markdown: str
+
+
+class ImportPersonaMarkdownResponse(BaseModel):
+    persona_id: int
+    name: str
+    version: int
+    created: bool = True
+
+
+class ProjectWorkflowPersona(BaseModel):
+    persona_id: int
+    name: str
+    role: str
+    workflow_stage: str
+    focus_area: str
+    summary: str
+    goals: List[str] = Field(default_factory=list)
+    workflow_focus: List[str] = Field(default_factory=list)
+    starter_questions: List[str] = Field(default_factory=list)
+    version: int = 1
+
+
+class CreateProjectRequest(BaseModel):
+    name: str
+    end_product: str
+    target_host: Optional[str] = "Saccharomyces cerevisiae"
+    project_goal: Optional[str] = None
+    raw_material_focus: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ProjectResponse(BaseModel):
+    id: int
+    name: str
+    scope_id: str
+    end_product: str
+    target_host: str
+    project_goal: str
+    raw_material_focus: Optional[str] = None
+    notes: Optional[str] = None
+    status: Literal["draft", "active", "archived"]
+    created_at: str
+    updated_at: str
+    personas: List[ProjectWorkflowPersona] = Field(default_factory=list)
+
+
+class ProjectListResponse(BaseModel):
+    projects: List[ProjectResponse] = Field(default_factory=list)
+
+
+class CreateProjectResponse(BaseModel):
+    project: ProjectResponse
+    created_persona_ids: List[int] = Field(default_factory=list)
+
+
+class ResearchFinding(BaseModel):
+    id: str
+    citation: str = ""
+    labels: List[str] = Field(default_factory=list)
+    knowns: List[str] = Field(default_factory=list)
+    unknowns: List[str] = Field(default_factory=list)
+    relevance: str = ""
+
+
+class ResearchGap(BaseModel):
+    id: str
+    theme: str = ""
+    supporting_signals: List[str] = Field(default_factory=list)
+    next_question: str = ""
+    priority_note: str = ""
+
+
+class JudgmentCall(BaseModel):
+    id: str
+    stance: str = ""
+    rationale: str = ""
+    implication: str = ""
+
+
+class ValidationTrack(BaseModel):
+    id: str
+    target: str = ""
+    method: str = ""
+    questions: List[str] = Field(default_factory=list)
+    success_signal: str = ""
+
+
+class ProposalCandidate(BaseModel):
+    id: str
+    title: str = ""
+    why_now: str = ""
+    experiment_outline: str = ""
+    readouts: List[str] = Field(default_factory=list)
+
+
+class ResearchWorkTemplate(BaseModel):
+    initial_query: str = ""
+    literature_findings: List[ResearchFinding] = Field(default_factory=list)
+    common_gaps: List[ResearchGap] = Field(default_factory=list)
+    judgment_calls: List[JudgmentCall] = Field(default_factory=list)
+    validation_tracks: List[ValidationTrack] = Field(default_factory=list)
+    proposal_candidates: List[ProposalCandidate] = Field(default_factory=list)
+    synthesis_memo: str = ""
+
+
+class FetchProjectLiteratureRequest(BaseModel):
+    persona_id: int
+    query: str
+    objective_id: Optional[str] = None
+    objective_title: Optional[str] = None
+    objective_definition: Optional[str] = None
+    objective_signals: List[str] = Field(default_factory=list)
+    project_goal: Optional[str] = None
+    project_end_product: Optional[str] = None
+    project_target_host: Optional[str] = None
+    clarifying_answers: Dict[str, str] = Field(default_factory=dict)
+    objective_answers: Dict[str, str] = Field(default_factory=dict)
+    global_question_answers: Dict[str, str] = Field(default_factory=dict)
+    reasoning_notes: Optional[str] = None
+    work_template: Optional[ResearchWorkTemplate] = None
+    max_results: int = 5
+    existing_citations: List[str] = Field(default_factory=list)
+
+
+class LiteratureToolTrace(BaseModel):
+    tool_name: str
+    query: str
+    result_count: int
+    status: Literal["success", "error"] = "success"
+    error_message: Optional[str] = None
+
+
+class FetchProjectLiteratureResponse(BaseModel):
+    findings: List[ResearchFinding] = Field(default_factory=list)
+    tool_trace: LiteratureToolTrace
+    objective_lens: Optional[str] = None
+    processing_summary: str = ""
+    elicitation_questions: List[str] = Field(default_factory=list)
+
+
+class GenerateProjectPlanRequest(BaseModel):
+    persona_id: int
+    focus_question: Optional[str] = None
+    notes: Optional[str] = None
+    clarifying_answers: Dict[str, str] = Field(default_factory=dict)
+    reasoning_notes: Optional[str] = None
+    work_template: Optional[ResearchWorkTemplate] = None
+
+
+class ProjectWorkspaceState(BaseModel):
+    project_id: int
+    persona_id: int
+    focus_question: Optional[str] = None
+    clarifying_answers: Dict[str, str] = Field(default_factory=dict)
+    reasoning_notes: Optional[str] = None
+    work_template: Optional[ResearchWorkTemplate] = None
+    plan: Optional[AgenticPlan] = None
+    selected_step_id: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ProjectWorkspaceRequest(BaseModel):
+    focus_question: Optional[str] = None
+    clarifying_answers: Dict[str, str] = Field(default_factory=dict)
+    reasoning_notes: Optional[str] = None
+    work_template: Optional[ResearchWorkTemplate] = None
+    plan: Optional[AgenticPlan] = None
+    selected_step_id: Optional[str] = None
+
+
+class ProjectWorkspaceResponse(BaseModel):
+    state: Optional[ProjectWorkspaceState] = None
+
+
+class StartProjectExecutionRequest(BaseModel):
+    persona_id: int
+    focus_question: Optional[str] = None
+    notes: Optional[str] = None
+    clarifying_answers: Dict[str, str] = Field(default_factory=dict)
+    reasoning_notes: Optional[str] = None
+    work_template: Optional[ResearchWorkTemplate] = None
+    objective_id: Optional[str] = None
+    objective_title: Optional[str] = None
+    objective_definition: Optional[str] = None
+    objective_signals: List[str] = Field(default_factory=list)
+
+
+class ProjectExecutionEvent(BaseModel):
+    id: int
+    run_id: int
+    event_type: str
+    stage_key: Optional[str] = None
+    title: str = ""
+    detail: str = ""
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class ProjectExecutionRun(BaseModel):
+    id: int
+    project_id: int
+    persona_id: int
+    run_kind: str = "agentic_execution"
+    status: Literal["queued", "running", "completed", "failed"] = "queued"
+    objective_id: Optional[str] = None
+    mode_label: Optional[str] = None
+    focus_question: Optional[str] = None
+    current_stage: Optional[str] = None
+    summary: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: str
+    updated_at: str
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    final_work_template: Optional[ResearchWorkTemplate] = None
+    final_plan: Optional[AgenticPlan] = None
+
+
+class ProjectExecutionRunResponse(BaseModel):
+    run: Optional[ProjectExecutionRun] = None
+    events: List[ProjectExecutionEvent] = Field(default_factory=list)
