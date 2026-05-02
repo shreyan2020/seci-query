@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List
@@ -30,6 +31,22 @@ PUBMED_SEARCH_TOOL = {
                     "maximum": 8,
                     "default": 5,
                 },
+            },
+        },
+    },
+}
+
+LITERATURE_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_literature",
+        "description": "Search PubMed plus scholarly metadata APIs for literature relevant to the current biotech question.",
+        "parameters": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "description": "Scientific literature query for the current project question."},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 12, "default": 5},
             },
         },
     },
@@ -191,7 +208,7 @@ _PUBMED_SYNONYMS = {
 
 
 def available_research_tools() -> List[Dict[str, Any]]:
-    return [PUBMED_SEARCH_TOOL, READ_LOCAL_PDF_TOOL]
+    return [LITERATURE_SEARCH_TOOL, PUBMED_SEARCH_TOOL, READ_LOCAL_PDF_TOOL]
 
 
 def _tool_user_agent() -> str:
@@ -210,6 +227,42 @@ def _unique_in_order(values: List[str]) -> List[str]:
         seen.add(key)
         out.append(value)
     return out
+
+
+def _clean_doi(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", text, flags=re.IGNORECASE)
+    return text.strip().rstrip(".").lower()
+
+
+def _title_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()[:180]
+
+
+def _record_key(record: Dict[str, Any]) -> str:
+    doi = _clean_doi(record.get("doi"))
+    if doi:
+        return f"doi:{doi}"
+    pmid = str(record.get("pmid") or "").strip()
+    if pmid:
+        return f"pmid:{pmid}"
+    pmcid = str(record.get("pmcid") or "").strip().upper()
+    if pmcid:
+        return f"pmcid:{pmcid}"
+    return f"title:{_title_key(str(record.get('title') or record.get('citation') or ''))}"
+
+
+def _merge_record(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    merged = {**existing}
+    for key, value in incoming.items():
+        if key == "sources":
+            merged["sources"] = _unique_in_order([*(merged.get("sources") or []), *(value or [])])
+        elif key == "abstract":
+            if len(str(value or "")) > len(str(merged.get("abstract") or "")):
+                merged[key] = value
+        elif value and not merged.get(key):
+            merged[key] = value
+    return merged
 
 
 def _tokenize_pubmed_text(value: str) -> List[str]:
@@ -405,9 +458,18 @@ async def search_pubmed(
         abstract = "\n".join(abstract_parts).strip()
 
         citation = ". ".join(part for part in [title, journal, year, f"PMID: {pmid}"] if part).strip()
+        article_ids = {}
+        for node in article.findall(".//PubmedData/ArticleIdList/ArticleId"):
+            id_type = (node.attrib.get("IdType") or "").strip().lower()
+            value = (node.text or "").strip()
+            if id_type and value:
+                article_ids[id_type] = value
+        pmcid = article_ids.get("pmc", "")
         articles.append(
             {
                 "pmid": pmid,
+                "pmcid": pmcid,
+                "doi": article_ids.get("doi", ""),
                 "title": title,
                 "journal": journal,
                 "year": year,
@@ -424,6 +486,613 @@ async def search_pubmed(
         "search_query": effective_query,
         "attempts": attempts,
         "results": articles,
+    }
+
+
+async def search_semantic_scholar(query: str, max_results: int = 5) -> Dict[str, Any]:
+    query = " ".join(str(query or "").split()).strip()
+    if not query:
+        return {"query": "", "results": [], "error": "query is required"}
+    max_results = max(1, min(int(max_results or 5), 10))
+    timeout = httpx.Timeout(30.0, connect=10.0)
+    fields = "title,abstract,year,authors,journal,externalIds,url,citationCount,openAccessPdf,isOpenAccess,publicationVenue"
+    headers = {}
+    api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
+    if api_key:
+        headers["x-api-key"] = api_key
+    async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+        response = await client.get(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            params={"query": query, "limit": max_results, "fields": fields},
+        )
+        response.raise_for_status()
+    records = []
+    for item in (response.json() or {}).get("data", []) or []:
+        external = item.get("externalIds") or {}
+        doi = _clean_doi(external.get("DOI"))
+        pmid = str(external.get("PubMed") or "").strip()
+        pmcid = str(external.get("PubMedCentral") or "").strip()
+        pdf_url = str((item.get("openAccessPdf") or {}).get("url") or "").strip()
+        venue = (item.get("journal") or {}).get("name") or (item.get("publicationVenue") or {}).get("name") or ""
+        title = str(item.get("title") or "").strip()
+        year = str(item.get("year") or "").strip()
+        citation = ". ".join(part for part in [title, venue, year, f"DOI: {doi}" if doi else "", f"PMID: {pmid}" if pmid else ""] if part)
+        records.append(
+            {
+                "source": "semantic_scholar",
+                "sources": ["semantic_scholar"],
+                "pmid": pmid,
+                "pmcid": pmcid,
+                "doi": doi,
+                "pdf_url": pdf_url,
+                "title": title,
+                "journal": venue,
+                "year": year,
+                "authors": [str(author.get("name") or "").strip() for author in (item.get("authors") or [])[:8] if str(author.get("name") or "").strip()],
+                "abstract": str(item.get("abstract") or "")[:5000],
+                "citation": citation or title,
+                "url": str(item.get("url") or "").strip(),
+                "cited_by_count": item.get("citationCount"),
+                "is_open_access": bool(item.get("isOpenAccess")),
+            }
+        )
+    return {"query": query, "search_query": query, "attempts": [{"query": query, "result_count": len(records)}], "results": records}
+
+
+async def search_openalex(query: str, max_results: int = 5) -> Dict[str, Any]:
+    query = " ".join(str(query or "").split()).strip()
+    if not query:
+        return {"query": "", "results": [], "error": "query is required"}
+    max_results = max(1, min(int(max_results or 5), 10))
+    _, email = _tool_user_agent()
+    timeout = httpx.Timeout(30.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(
+            "https://api.openalex.org/works",
+            params={"search": query, "per-page": max_results, "mailto": email},
+        )
+        response.raise_for_status()
+    records = []
+    for item in (response.json() or {}).get("results", []) or []:
+        ids = item.get("ids") or {}
+        doi = _clean_doi(ids.get("doi") or item.get("doi"))
+        pmid = str(ids.get("pmid") or "").rstrip("/").split("/")[-1] if ids.get("pmid") else ""
+        title = str(item.get("title") or "").strip()
+        year = str(item.get("publication_year") or "").strip()
+        primary_location = item.get("primary_location") or {}
+        source = primary_location.get("source") or {}
+        journal = str(source.get("display_name") or "").strip()
+        open_access = item.get("open_access") or {}
+        pdf_url = str(open_access.get("oa_url") or (primary_location.get("pdf_url") or "")).strip()
+        authors = []
+        for authorship in (item.get("authorships") or [])[:8]:
+            author = authorship.get("author") or {}
+            name = str(author.get("display_name") or "").strip()
+            if name:
+                authors.append(name)
+        abstract = ""
+        inv = item.get("abstract_inverted_index") or {}
+        if isinstance(inv, dict):
+            words: List[tuple[int, str]] = []
+            for word, positions in inv.items():
+                for pos in positions or []:
+                    words.append((int(pos), str(word)))
+            abstract = " ".join(word for _, word in sorted(words))[:5000]
+        citation = ". ".join(part for part in [title, journal, year, f"DOI: {doi}" if doi else "", f"PMID: {pmid}" if pmid else ""] if part)
+        records.append(
+            {
+                "source": "openalex",
+                "sources": ["openalex"],
+                "pmid": pmid,
+                "pmcid": "",
+                "doi": doi,
+                "pdf_url": pdf_url,
+                "title": title,
+                "journal": journal,
+                "year": year,
+                "authors": authors,
+                "abstract": abstract,
+                "citation": citation or title,
+                "url": str(ids.get("openalex") or "").strip(),
+                "cited_by_count": item.get("cited_by_count"),
+                "is_open_access": bool(open_access.get("is_oa")),
+            }
+        )
+    return {"query": query, "search_query": query, "attempts": [{"query": query, "result_count": len(records)}], "results": records}
+
+
+async def search_crossref(query: str, max_results: int = 5) -> Dict[str, Any]:
+    query = " ".join(str(query or "").split()).strip()
+    if not query:
+        return {"query": "", "results": [], "error": "query is required"}
+    max_results = max(1, min(int(max_results or 5), 10))
+    _, email = _tool_user_agent()
+    headers = {"User-Agent": f"dsm_interface_agent (mailto:{email})"}
+    timeout = httpx.Timeout(30.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+        response = await client.get(
+            "https://api.crossref.org/works",
+            params={"query": query, "rows": max_results, "sort": "relevance"},
+        )
+        response.raise_for_status()
+    records = []
+    for item in ((response.json() or {}).get("message") or {}).get("items", []) or []:
+        title = str((item.get("title") or [""])[0] or "").strip()
+        doi = _clean_doi(item.get("DOI"))
+        year_parts = (((item.get("published-print") or item.get("published-online") or item.get("issued") or {}).get("date-parts") or [[]])[0])
+        year = str(year_parts[0]) if year_parts else ""
+        journal = str((item.get("container-title") or [""])[0] or "").strip()
+        authors = []
+        for author in (item.get("author") or [])[:8]:
+            name = " ".join(part for part in [author.get("given"), author.get("family")] if part).strip()
+            if name:
+                authors.append(name)
+        citation = ". ".join(part for part in [title, journal, year, f"DOI: {doi}" if doi else ""] if part)
+        records.append(
+            {
+                "source": "crossref",
+                "sources": ["crossref"],
+                "pmid": "",
+                "pmcid": "",
+                "doi": doi,
+                "pdf_url": "",
+                "title": title,
+                "journal": journal,
+                "year": year,
+                "authors": authors,
+                "abstract": re.sub(r"<[^>]+>", " ", str(item.get("abstract") or ""))[:5000],
+                "citation": citation or title,
+                "url": str(item.get("URL") or "").strip(),
+                "cited_by_count": item.get("is-referenced-by-count"),
+            }
+        )
+    return {"query": query, "search_query": query, "attempts": [{"query": query, "result_count": len(records)}], "results": records}
+
+
+async def search_literature(
+    query: str,
+    max_results: int = 5,
+    *,
+    project_goal: str = "",
+    objective_title: str = "",
+    objective_definition: str = "",
+    objective_signals: List[str] | None = None,
+    user_inputs: List[str] | None = None,
+) -> Dict[str, Any]:
+    query = " ".join(str(query or "").split()).strip()
+    max_results = max(1, min(int(max_results or 5), 12))
+    if not query:
+        return {"query": "", "results": [], "error": "query is required"}
+    formulated_query = formulate_pubmed_query(
+        query,
+        project_goal=project_goal,
+        objective_title=objective_title,
+        objective_definition=objective_definition,
+        objective_signals=objective_signals,
+        user_inputs=user_inputs,
+        max_terms=8,
+    )
+    source_calls = [
+        ("pubmed", search_pubmed(query, max_results=max_results, project_goal=project_goal, objective_title=objective_title, objective_definition=objective_definition, objective_signals=objective_signals, user_inputs=user_inputs)),
+        ("semantic_scholar", search_semantic_scholar(formulated_query or query, max_results=max_results)),
+        ("openalex", search_openalex(formulated_query or query, max_results=max_results)),
+        ("crossref", search_crossref(formulated_query or query, max_results=max_results)),
+    ]
+    results_by_key: Dict[str, Dict[str, Any]] = {}
+    attempts: List[Dict[str, Any]] = []
+    source_counts: Dict[str, int] = {}
+    errors: Dict[str, str] = {}
+    for source_name, call in source_calls:
+        try:
+            payload = await call
+            records = payload.get("results") or []
+            source_counts[source_name] = len(records)
+            for attempt in payload.get("attempts") or [{"query": payload.get("search_query") or query, "result_count": len(records)}]:
+                attempts.append({"source": source_name, **attempt})
+            for record in records:
+                record["sources"] = _unique_in_order([*(record.get("sources") or []), source_name])
+                key = _record_key(record)
+                if not key or key == "title:":
+                    continue
+                results_by_key[key] = _merge_record(results_by_key[key], record) if key in results_by_key else record
+        except Exception as exc:
+            source_counts[source_name] = 0
+            errors[source_name] = str(exc)
+            attempts.append({"source": source_name, "query": formulated_query or query, "result_count": 0, "error": str(exc)})
+
+    results = list(results_by_key.values())
+    ranked_results = sorted(
+        results,
+        key=lambda item: (
+            0 if "pubmed" in (item.get("sources") or []) else 1,
+            -int(item.get("cited_by_count") or 0),
+            -(int(item.get("year") or 0) if str(item.get("year") or "").isdigit() else 0),
+        )
+    )
+    selected: List[Dict[str, Any]] = []
+    selected_keys = set()
+    source_order = ["pubmed", "semantic_scholar", "openalex", "crossref"]
+    while len(selected) < max_results:
+        added = False
+        for source_name in source_order:
+            for item in ranked_results:
+                key = _record_key(item)
+                if key in selected_keys or source_name not in (item.get("sources") or []):
+                    continue
+                selected.append(item)
+                selected_keys.add(key)
+                added = True
+                break
+            if len(selected) >= max_results:
+                break
+        if not added:
+            break
+    for item in ranked_results:
+        if len(selected) >= max_results:
+            break
+        key = _record_key(item)
+        if key not in selected_keys:
+            selected.append(item)
+            selected_keys.add(key)
+    return {
+        "query": query,
+        "formulated_query": formulated_query,
+        "search_query": formulated_query or query,
+        "attempts": attempts,
+        "source_counts": source_counts,
+        "errors": errors,
+        "results": selected,
+    }
+
+
+def extract_paper_ids(*values: str) -> Dict[str, str]:
+    text = "\n".join(str(value or "") for value in values)
+    pmid_match = re.search(r"\bPMID\s*:?\s*(\d+)\b|pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", text, re.IGNORECASE)
+    pmcid_match = re.search(r"\bPMCID\s*:?\s*(PMC\d+)\b|\b(PMC\d+)\b", text, re.IGNORECASE)
+    doi_match = re.search(r"\b(?:DOI\s*:?\s*)?(10\.\d{4,9}/[-._;()/:A-Z0-9]+)\b", text, re.IGNORECASE)
+    return {
+        "pmid": next((group for group in (pmid_match.groups() if pmid_match else ()) if group), "") if pmid_match else "",
+        "pmcid": next((group for group in (pmcid_match.groups() if pmcid_match else ()) if group), "").upper() if pmcid_match else "",
+        "doi": doi_match.group(1) if doi_match else "",
+    }
+
+
+async def resolve_pmcid_from_pmid(pmid: str) -> str:
+    pmid = str(pmid or "").strip()
+    if not pmid:
+        return ""
+    tool_name, email = _tool_user_agent()
+    timeout = httpx.Timeout(30.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        response = await client.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi",
+            params={
+                "dbfrom": "pubmed",
+                "db": "pmc",
+                "id": pmid,
+                "retmode": "json",
+                "tool": tool_name,
+                "email": email,
+            },
+        )
+        response.raise_for_status()
+    payload = response.json() or {}
+    for linkset in payload.get("linksets", []):
+        for linkdb in linkset.get("linksetdbs", []):
+            for link in linkdb.get("links", []):
+                value = str(link or "").strip()
+                if value:
+                    return f"PMC{value}" if not value.upper().startswith("PMC") else value.upper()
+    return ""
+
+
+def _safe_paper_id(pmid: str = "", pmcid: str = "", doi: str = "") -> str:
+    raw = pmcid or (f"PMID{pmid}" if pmid else "") or doi or "paper"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("_")[:80] or "paper"
+
+
+async def download_open_access_pdf(
+    *,
+    pmid: str = "",
+    pmcid: str = "",
+    doi: str = "",
+    pdf_url: str = "",
+    output_dir: str | Path,
+) -> Dict[str, Any]:
+    if pdf_url:
+        paper_id = _safe_paper_id(pmid=pmid, pmcid=pmcid, doi=doi or pdf_url)
+        target_dir = Path(output_dir) / paper_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        original_path = target_dir / "original.pdf"
+        timeout = httpx.Timeout(60.0, connect=15.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            try:
+                response = await client.get(pdf_url, headers={"Accept": "application/pdf,*/*"})
+                content_type = response.headers.get("content-type", "").lower()
+                if response.status_code < 400 and (response.content.startswith(b"%PDF") or "pdf" in content_type):
+                    original_path.write_bytes(response.content)
+                    return {
+                        "status": "success",
+                        "paper_id": paper_id,
+                        "pmcid": pmcid,
+                        "pmid": pmid,
+                        "source_pdf_url": pdf_url,
+                        "original_pdf_path": str(original_path),
+                    }
+            except Exception:
+                pass
+
+    if not pmcid and pmid:
+        pmcid = await resolve_pmcid_from_pmid(pmid)
+    if not pmcid:
+        return {"status": "not_open_access", "message": "No PubMed Central open-access full text link was found."}
+
+    paper_id = _safe_paper_id(pmid=pmid, pmcid=pmcid, doi=doi)
+    target_dir = Path(output_dir) / paper_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    original_path = target_dir / "original.pdf"
+    candidates = [
+        f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/",
+        f"https://europepmc.org/articles/{pmcid}?pdf=render",
+    ]
+    timeout = httpx.Timeout(60.0, connect=15.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        for url in candidates:
+            try:
+                response = await client.get(url, headers={"Accept": "application/pdf,*/*"})
+                content_type = response.headers.get("content-type", "").lower()
+                if response.status_code < 400 and (response.content.startswith(b"%PDF") or "pdf" in content_type):
+                    original_path.write_bytes(response.content)
+                    return {
+                        "status": "success",
+                        "paper_id": paper_id,
+                        "pmcid": pmcid,
+                        "pmid": pmid,
+                        "source_pdf_url": url,
+                        "original_pdf_path": str(original_path),
+                    }
+            except Exception:
+                continue
+    return {"status": "not_open_access", "paper_id": paper_id, "pmcid": pmcid, "pmid": pmid, "message": "Could not download an open-access PDF."}
+
+
+def _annotation_terms(query: str, objective_text: str) -> List[str]:
+    tokens = _tokenize_pubmed_text(f"{query} {objective_text}")
+    terms = [token for token in tokens if token in _PUBMED_DOMAIN_TERMS or len(token) >= 5]
+    return _unique_in_order(terms)[:24]
+
+
+_ANNOTATION_WEAK_TERMS = {
+    "article",
+    "attribution",
+    "author",
+    "authors",
+    "available",
+    "background",
+    "common",
+    "commons",
+    "copyright",
+    "creative",
+    "distributed",
+    "figure",
+    "figures",
+    "international",
+    "license",
+    "licenses",
+    "material",
+    "materials",
+    "method",
+    "methods",
+    "original",
+    "provided",
+    "published",
+    "publisher",
+    "reference",
+    "references",
+    "review",
+    "rights",
+    "section",
+    "supplementary",
+    "table",
+    "terms",
+}
+
+_ANNOTATION_BOILERPLATE_PATTERNS = [
+    "creative commons",
+    "attribution 4.0",
+    "copyright",
+    "license",
+    "distributed under the terms",
+    "correspondence",
+    "full list of author information",
+    "supplementary material",
+    "publisher's note",
+    "all rights reserved",
+    "received:",
+    "accepted:",
+]
+
+
+def _weighted_annotation_terms(contexts: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
+    weights = {
+        "query": 6,
+        "project_goal": 5,
+        "end_product": 6,
+        "host": 5,
+        "objective": 5,
+        "persona": 3,
+        "paper": 4,
+    }
+    labels = {
+        "query": "the investigation query",
+        "project_goal": "the project goal",
+        "end_product": "the target end product",
+        "host": "the target host",
+        "objective": "the selected objective",
+        "objective_title": "the selected objective",
+        "persona": "the collaborator lens",
+        "persona_name": "the collaborator lens",
+        "paper": "the fetched paper summary",
+    }
+    terms: Dict[str, Dict[str, Any]] = {}
+    for source, text in contexts.items():
+        for token in _tokenize_pubmed_text(text):
+            if token in _ANNOTATION_WEAK_TERMS or len(token) < 4:
+                continue
+            if token not in _PUBMED_DOMAIN_TERMS and len(token) < 6:
+                continue
+            entry = terms.setdefault(token, {"score": 0, "sources": []})
+            entry["score"] += weights.get(source, 1) + (3 if token in _PUBMED_DOMAIN_TERMS else 0)
+            if labels.get(source) not in entry["sources"]:
+                entry["sources"].append(labels.get(source, source))
+    return dict(sorted(terms.items(), key=lambda item: -item[1]["score"])[:40])
+
+
+def _is_boilerplate_line(line: str) -> bool:
+    lower = line.lower()
+    return any(pattern in lower for pattern in _ANNOTATION_BOILERPLATE_PATTERNS)
+
+
+def _annotation_reason(item: Dict[str, Any], term_info: Dict[str, Dict[str, Any]], contexts: Dict[str, str]) -> str:
+    matched = item.get("matched_terms") or []
+    source_labels: List[str] = []
+    for term in matched:
+        for label in term_info.get(term, {}).get("sources", []):
+            if label not in source_labels:
+                source_labels.append(label)
+    anchor_bits = []
+    if contexts.get("end_product"):
+        anchor_bits.append(f"end product '{contexts['end_product']}'")
+    if contexts.get("host"):
+        anchor_bits.append(f"host '{contexts['host']}'")
+    if contexts.get("objective_title"):
+        anchor_bits.append(f"objective '{contexts['objective_title']}'")
+    if contexts.get("persona_name"):
+        anchor_bits.append(f"collaborator '{contexts['persona_name']}'")
+    source_text = ", ".join(source_labels[:3]) or "the current workspace context"
+    anchor_text = "; ".join(anchor_bits[:3])
+    term_text = ", ".join(matched[:5])
+    if anchor_text:
+        return f"Relevant to {source_text} ({anchor_text}); matched evidence terms: {term_text}. Use this passage to judge whether the paper informs this specific project context."
+    return f"Relevant to {source_text}; matched evidence terms: {term_text}. Use this passage to judge whether the paper informs the current query."
+
+
+def _split_page_lines(text: str) -> List[str]:
+    lines = []
+    for line in re.split(r"[\n\r]+", text or ""):
+        cleaned = re.sub(r"\s+", " ", line).strip()
+        if len(cleaned) >= 50:
+            lines.append(cleaned)
+    if lines:
+        return lines
+    sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", text or "").strip())
+    return [sentence.strip() for sentence in sentences if len(sentence.strip()) >= 50]
+
+
+def annotate_pdf_for_objective(
+    *,
+    pdf_path: str | Path,
+    query: str,
+    project_goal: str = "",
+    project_end_product: str = "",
+    project_target_host: str = "",
+    persona_name: str = "",
+    persona_focus: str = "",
+    objective_title: str = "",
+    objective_definition: str = "",
+    objective_signals: List[str] | None = None,
+    paper_context: str = "",
+    output_path: str | Path | None = None,
+    max_annotations: int = 8,
+) -> Dict[str, Any]:
+    pdf_path = Path(pdf_path)
+    output_path = Path(output_path) if output_path else pdf_path.with_name("annotated.pdf")
+    contexts = {
+        "query": query or "",
+        "project_goal": project_goal or "",
+        "end_product": project_end_product or "",
+        "host": project_target_host or "",
+        "objective": " ".join([objective_title or "", objective_definition or "", " ".join(objective_signals or [])]),
+        "objective_title": objective_title or "",
+        "persona": " ".join([persona_name or "", persona_focus or ""]),
+        "persona_name": persona_name or "",
+        "paper": paper_context or "",
+    }
+    term_info = _weighted_annotation_terms(contexts)
+    terms = list(term_info.keys())
+
+    try:
+        import fitz  # PyMuPDF
+    except Exception:
+        shutil.copyfile(pdf_path, output_path)
+        return {
+            "annotated_pdf_path": str(output_path),
+            "annotations": [],
+            "insights": ["PyMuPDF is not installed, so visual PDF annotations could not be generated."],
+            "visual_annotations": False,
+        }
+
+    doc = fitz.open(str(pdf_path))
+    candidates: List[Dict[str, Any]] = []
+    for page_index, page in enumerate(doc):
+        text = page.get_text("text") or ""
+        for line in _split_page_lines(text):
+            if _is_boilerplate_line(line):
+                continue
+            lower = line.lower()
+            matched = [term for term in terms if term.lower() in lower]
+            strong_matched = [term for term in matched if term in _PUBMED_DOMAIN_TERMS or term_info.get(term, {}).get("score", 0) >= 8]
+            if len(set(strong_matched)) < 2:
+                continue
+            score = sum(term_info.get(term, {}).get("score", 1) for term in set(strong_matched)) + min(len(line) / 500.0, 1.2)
+            candidates.append(
+                {
+                    "page": page_index + 1,
+                    "snippet": line[:700],
+                    "matched_terms": _unique_in_order(strong_matched)[:10],
+                    "score": round(score, 3),
+                }
+            )
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    selected: List[Dict[str, Any]] = []
+    seen = set()
+    for item in candidates:
+        key = re.sub(r"\W+", " ", item["snippet"].lower())[:120]
+        if key in seen:
+            continue
+        seen.add(key)
+        reason = _annotation_reason(item, term_info, contexts)
+        selected.append({**item, "reason": reason})
+        if len(selected) >= max(1, min(max_annotations, 20)):
+            break
+
+    for item in selected:
+        page = doc[item["page"] - 1]
+        snippet = item["snippet"]
+        rects = page.search_for(snippet)
+        if not rects:
+            words = snippet.split()
+            for size in [18, 12, 8, 5]:
+                if len(words) >= size:
+                    rects = page.search_for(" ".join(words[:size]))
+                    if rects:
+                        break
+        if rects:
+            annot = page.add_highlight_annot(rects[:4])
+            annot.set_info(content=item["reason"])
+            annot.update()
+        else:
+            page.add_text_annot((36, 36), item["reason"])
+
+    doc.save(str(output_path), garbage=4, deflate=True)
+    doc.close()
+    insights = [f"Page {item['page']}: {item['snippet'][:220]}" for item in selected[:5]]
+    return {
+        "annotated_pdf_path": str(output_path),
+        "annotations": selected,
+        "insights": insights,
+        "visual_annotations": True,
     }
 
 
@@ -491,6 +1160,7 @@ def collect_pdf_paths(*values: str) -> List[str]:
 
 def get_research_tool_handlers() -> Dict[str, Any]:
     return {
+        "search_literature": search_literature,
         "search_pubmed": search_pubmed,
         "read_local_pdf": read_local_pdf,
     }

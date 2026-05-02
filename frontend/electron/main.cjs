@@ -1,4 +1,4 @@
-const { app, BrowserWindow, nativeTheme, dialog } = require('electron');
+const { app, BrowserWindow, nativeTheme, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
@@ -18,6 +18,14 @@ let mainWindow = null;
 let webProc = null;
 let apiProc = null;
 let activeFrontendPort = FRONTEND_PORT;
+
+ipcMain.handle('open-path', async (_event, targetPath) => {
+  if (!targetPath || typeof targetPath !== 'string') {
+    return { ok: false, error: 'missing_path' };
+  }
+  const errorMessage = await shell.openPath(targetPath);
+  return errorMessage ? { ok: false, error: errorMessage } : { ok: true };
+});
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

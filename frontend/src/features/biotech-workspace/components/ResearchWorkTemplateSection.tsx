@@ -21,6 +21,9 @@ interface ResearchWorkTemplateSectionProps {
   literatureElicitationAnswers?: Record<string, string>;
   onLiteratureElicitationAnswerChange?: (question: string, value: string) => void;
   onCaptureLiteratureTacitAnswer?: (question: string) => void;
+  onPreparePaperPdf?: (finding: ResearchFinding) => void;
+  preparingPdfFindingId?: string | null;
+  pdfAnnotationStatus?: string | null;
 }
 
 function makeId(prefix: string) {
@@ -136,6 +139,9 @@ export function ResearchWorkTemplateSection({
   literatureElicitationAnswers = {},
   onLiteratureElicitationAnswerChange,
   onCaptureLiteratureTacitAnswer,
+  onPreparePaperPdf,
+  preparingPdfFindingId,
+  pdfAnnotationStatus,
 }: ResearchWorkTemplateSectionProps) {
   const setInitialQuery = (value: string) => onWorkTemplateChange({ ...workTemplate, initial_query: value });
   const setSynthesisMemo = (value: string) => onWorkTemplateChange({ ...workTemplate, synthesis_memo: value });
@@ -148,6 +154,7 @@ export function ResearchWorkTemplateSection({
       knowns: [],
       unknowns: [],
       relevance: '',
+      source_ids: {},
     };
     onWorkTemplateChange({
       ...workTemplate,
@@ -303,7 +310,13 @@ export function ResearchWorkTemplateSection({
         </div>
       )}
 
-      {(literatureProcessingSummary || literatureObjectiveLens || literatureElicitationQuestions.length > 0) && (
+      {pdfAnnotationStatus && (
+        <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-950">
+          {pdfAnnotationStatus}
+        </div>
+      )}
+
+      {(literatureProcessingSummary || literatureObjectiveLens) && (
         <div className="mt-3 rounded-[1.4rem] border border-sky-200 bg-[linear-gradient(135deg,rgba(239,246,255,0.98),rgba(240,253,250,0.9))] p-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
@@ -324,30 +337,8 @@ export function ResearchWorkTemplateSection({
           )}
 
           {literatureElicitationQuestions.length > 0 && (
-            <div className="mt-3 grid gap-3 xl:grid-cols-2">
-              {literatureElicitationQuestions.map((question) => {
-                const answer = literatureElicitationAnswers[question] || '';
-                return (
-                  <div key={question} className="rounded-2xl border border-sky-100 bg-white/85 p-3">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-sky-800">Tacit input needed</div>
-                    <div className="mt-1 text-sm leading-6 text-slate-800">{question}</div>
-                    <textarea
-                      value={answer}
-                      onChange={(e) => onLiteratureElicitationAnswerChange?.(question, e.target.value)}
-                      rows={3}
-                      className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
-                      placeholder="Add your transferability, feasibility, boundary-condition, or priority judgment..."
-                    />
-                    <button
-                      onClick={() => onCaptureLiteratureTacitAnswer?.(question)}
-                      disabled={!answer.trim()}
-                      className={classNames(cardButtonClass(), 'mt-2 disabled:cursor-not-allowed disabled:opacity-50')}
-                    >
-                      Add as judgment call
-                    </button>
-                  </div>
-                );
-              })}
+            <div className="mt-3 rounded-2xl border border-white/80 bg-white/70 px-3 py-2 text-xs leading-5 text-slate-600">
+              Paper-specific judgment prompts are available inside each annotated PDF review panel.
             </div>
           )}
         </div>
@@ -389,7 +380,7 @@ export function ResearchWorkTemplateSection({
           <SectionHeader
             eyebrow="Evidence Library"
             title="Literature findings"
-            description="Track the specific papers, examples, knowns, and open questions that should feed later decisions."
+            description="Review fetched papers first as source cards. Generate annotations only when you are ready to inspect a paper."
             actionLabel="Add finding"
             onAction={addLiteratureFinding}
           />
@@ -403,13 +394,47 @@ export function ResearchWorkTemplateSection({
               />
             ) : (
               workTemplate.literature_findings.map((finding, index) => (
-                <div key={finding.id} className="rounded-[1.25rem] border border-slate-200 bg-white p-4">
+                <div key={`${finding.id}-${finding.citation || index}`} className="rounded-[1.25rem] border border-slate-200 bg-white p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-sm font-semibold text-slate-950">Finding {index + 1}</div>
-                    <button onClick={() => removeLiteratureFinding(finding.id)} className={cardButtonClass()}>
-                      Remove
-                    </button>
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {onPreparePaperPdf && (
+                        <button
+                          onClick={() => onPreparePaperPdf(finding)}
+                          disabled={preparingPdfFindingId === finding.id}
+                          className={classNames(cardButtonClass(), 'disabled:cursor-not-allowed disabled:opacity-50')}
+                        >
+                          {preparingPdfFindingId === finding.id ? 'Generating annotations...' : 'Review paper'}
+                        </button>
+                      )}
+                      <button onClick={() => removeLiteratureFinding(finding.id)} className={cardButtonClass()}>
+                        Remove
+                      </button>
+                    </div>
                   </div>
+
+                  <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="line-clamp-2 text-sm font-semibold leading-6 text-slate-950">
+                      {finding.citation || 'Untitled literature source'}
+                    </div>
+                    <div className="mt-2 line-clamp-4 text-sm leading-6 text-slate-700">
+                      {finding.relevance || finding.knowns[0] || 'No summary captured yet. Open the paper review to inspect and annotate this source.'}
+                    </div>
+                    {finding.labels.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {finding.labels.slice(0, 6).map((label) => (
+                          <span key={`${finding.id}-${label}`} className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-700">
+                            {label}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <details className="mt-3 rounded-2xl border border-slate-200 bg-white p-3">
+                    <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-slate-600">
+                      Edit extracted fields
+                    </summary>
 
                   <label className="mt-3 block">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Citation Or Source</div>
@@ -430,6 +455,18 @@ export function ResearchWorkTemplateSection({
                       placeholder="Example: enzyme engineering, process optimization, transfer question"
                     />
                   </label>
+
+                  {finding.source_ids && Object.values(finding.source_ids).some(Boolean) && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {Object.entries(finding.source_ids)
+                        .filter(([, value]) => Boolean(value))
+                        .map(([key, value]) => (
+                          <span key={`${finding.id}-${key}`} className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-900">
+                            {key.toUpperCase()}: {value}
+                          </span>
+                        ))}
+                    </div>
+                  )}
 
                   <div className="mt-3 grid gap-3">
                     <Field
@@ -454,6 +491,7 @@ export function ResearchWorkTemplateSection({
                     onChange={(value) => updateLiteratureFinding(finding.id, { relevance: value })}
                     placeholder="Explain why this source matters, what transfers, and where you remain uncertain."
                   />
+                  </details>
                 </div>
               ))
             )}

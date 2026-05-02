@@ -39,11 +39,15 @@ from models import (
     ResetPersonasRequest, ResetPersonasResponse,
     ImportPersonaMarkdownRequest, ImportPersonaMarkdownResponse,
     CreateProjectRequest, CreateProjectResponse,
+    CreateProjectCollaboratorRequest, CreateProjectCollaboratorResponse,
+    ProjectQuerySession, ProjectQuerySessionListResponse,
+    CreateProjectQuerySessionRequest, UpdateProjectQuerySessionRequest,
     ProjectResponse, ProjectListResponse, ProjectWorkflowPersona,
     GenerateProjectPlanRequest, ResearchWorkTemplate,
     ProjectWorkspaceState, ProjectWorkspaceRequest, ProjectWorkspaceResponse,
     StartProjectExecutionRequest, ProjectExecutionEvent, ProjectExecutionRunResponse,
     FetchProjectLiteratureRequest, FetchProjectLiteratureResponse, LiteratureToolTrace, ResearchFinding,
+    PreparePaperPdfRequest, PreparePaperPdfResponse, PaperAnnotation,
     TacitMemoryItem, WorkspaceMemory, WorkspaceMemoryRequest, WorkspaceMemoryResponse,
 )
 from ollama_client import ollama
@@ -76,7 +80,7 @@ from qmd_client import health_check as qmd_health_check
 from persona_templates import list_persona_templates, get_persona_template
 from project_workflows import build_project_personas
 from agent_execution import run_agentic_execution, to_execution_response
-from research_tools import search_pubmed
+from research_tools import annotate_pdf_for_objective, download_open_access_pdf, extract_paper_ids, search_literature
 
 app = FastAPI(title="SECI Query Explorer API", version="1.0.0")
 
@@ -1115,6 +1119,10 @@ def _project_scope_id(project_id: int) -> str:
     return f"project:{project_id}"
 
 
+def _slug_fragment(value: str) -> str:
+    return "-".join(part for part in re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).split("-") if part) or "item"
+
+
 def _project_persona_row_to_response(row: dict) -> ProjectWorkflowPersona:
     persona_json = row.get("persona_json") or {}
     project_context = persona_json.get("project_context") or {}
@@ -1133,6 +1141,42 @@ def _project_persona_row_to_response(row: dict) -> ProjectWorkflowPersona:
         starter_questions=starter_questions[:3],
         version=int(row.get("version") or 1),
     )
+
+
+def _manual_project_persona_payload(project: dict, request: CreateProjectCollaboratorRequest) -> tuple[dict, str]:
+    name = (request.name or "").strip()
+    focus_area = (request.focus_area or request.summary or f"Support the project from a {request.workflow_stage or 'general'} perspective.").strip()
+    workflow_focus = [str(item).strip() for item in (request.workflow_focus or []) if str(item).strip()] or [focus_area]
+    goals = [str(item).strip() for item in (request.goals or []) if str(item).strip()] or [focus_area]
+    starter_questions = [str(item).strip() for item in (request.starter_questions or []) if str(item).strip()]
+    payload = {
+        "persona_id": f"{_slug_fragment(project.get('name'))}-manual-{_slug_fragment(name)}",
+        "scope_id": str(project.get("scope_id") or _project_scope_id(int(project["id"]))),
+        "role": (request.role or "workflow_partner").strip() or "workflow_partner",
+        "domain_expertise": {"biotech": "intermediate", "stats": "unknown", "coding": "unknown"},
+        "goals": goals[:4],
+        "constraints": {"time_sensitivity": "medium", "compliance_posture": "moderate", "risk_tolerance": "medium"},
+        "preferences": {"output_format": "mixed", "citation_need": "medium", "verbosity": "medium"},
+        "decision_style": "exploratory",
+        "trust_profile": {"default_reliance": "medium", "verification_habits": []},
+        "taboo_or_redlines": [],
+        "key_quotes": [],
+        "evidence": {"support": []},
+        "workflow_stage": (request.workflow_stage or "general").strip() or "general",
+        "workflow_focus": workflow_focus[:4],
+        "project_context": {
+            "project_name": project.get("name"),
+            "end_product": project.get("end_product"),
+            "target_host": project.get("target_host"),
+            "project_goal": project.get("project_goal"),
+            "focus_area": focus_area,
+            "starter_questions": starter_questions[:3],
+            "manual_creation": True,
+        },
+    }
+    validated = PersonaPayload.model_validate(payload)
+    summary = (request.summary or "").strip() or build_persona_summary(validated)
+    return validated.model_dump(), summary
 
 
 def _workspace_state_to_response(state: Optional[dict]) -> ProjectWorkspaceResponse:
@@ -1175,13 +1219,21 @@ def _execution_run_to_response(run: Optional[dict], events: Optional[List[dict]]
     )
 
 
-def _pubmed_record_to_research_finding(record: dict, index: int) -> ResearchFinding:
+def _literature_record_to_research_finding(record: dict, index: int) -> ResearchFinding:
     title = str(record.get("title") or "").strip()
     abstract = str(record.get("abstract") or "").strip()
     year = str(record.get("year") or "").strip()
-    labels = ["pubmed", "literature fetch"]
+    sources = [str(item).strip() for item in (record.get("sources") or [record.get("source") or "literature"]) if str(item).strip()]
+    labels = [*sources, "literature fetch"]
     if year:
         labels.append(year)
+    source_ids = {
+        key: str(record.get(key) or "").strip()
+        for key in ["pmid", "pmcid", "doi", "pdf_url"]
+        if str(record.get(key) or "").strip()
+    }
+    for key, value in source_ids.items():
+        labels.append(f"{key.upper()}: {value}")
     return ResearchFinding(
         id=f"lit_fetch_{index}",
         citation=str(record.get("citation") or title or f"PubMed result {index}").strip(),
@@ -1189,6 +1241,7 @@ def _pubmed_record_to_research_finding(record: dict, index: int) -> ResearchFind
         knowns=[title] if title else [],
         unknowns=[],
         relevance=abstract[:900],
+        source_ids=source_ids,
     )
 
 
@@ -1305,6 +1358,7 @@ Return JSON with this exact shape:
                         or (source_finding.knowns if source_finding else []),
                         unknowns=[str(value).strip() for value in (item.get("unknowns") or []) if str(value).strip()][:5],
                         relevance=str(item.get("relevance") or (source_finding.relevance if source_finding else "")).strip()[:1200],
+                        source_ids=(source_finding.source_ids if source_finding else {}),
                     )
                 )
 
@@ -1356,6 +1410,18 @@ def _project_row_to_response(row: dict) -> ProjectResponse:
         created_at=str(row.get("created_at") or ""),
         updated_at=str(row.get("updated_at") or ""),
         personas=_load_project_personas(int(row["id"]), scope_id),
+    )
+
+
+def _project_query_row_to_response(row: dict) -> ProjectQuerySession:
+    return ProjectQuerySession(
+        id=int(row["id"]),
+        project_id=int(row["project_id"]),
+        title=str(row.get("title") or ""),
+        query=str(row.get("query") or ""),
+        state=row.get("state") or {},
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -1709,6 +1775,83 @@ async def get_project(project_id: int):
     return _project_row_to_response(row)
 
 
+@app.post("/api/projects/{project_id}/collaborators", response_model=CreateProjectCollaboratorResponse)
+async def create_project_collaborator(project_id: int, request: CreateProjectCollaboratorRequest):
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    name = (request.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Collaborator name is required")
+
+    scope_id = str(project.get("scope_id") or _project_scope_id(project_id))
+    payload, summary = _manual_project_persona_payload(project, request)
+    persona_id = db.create_persona(
+        name=name,
+        scope=scope_id,
+        persona_json=payload,
+        last_summary=summary,
+        identity_key=f"manual-project-collaborator:{scope_id}:{_slug_fragment(name)}",
+        version=1,
+        source="manual_project_collaborator",
+        project_id=project_id,
+    )
+    _write_persona_context(scope_id, name, payload, summary, f"manual-project-collaborator:{scope_id}:{_slug_fragment(name)}")
+    await log_event_safe(
+        "project_collaborator_created",
+        {"project_id": project_id, "persona_id": persona_id, "name": name, "workflow_stage": payload.get("workflow_stage")},
+    )
+    refreshed = db.get_project(project_id)
+    if not refreshed:
+        raise HTTPException(status_code=500, detail="Failed to reload project")
+    persona = db.get_persona(persona_id)
+    if not persona:
+        raise HTTPException(status_code=500, detail="Failed to load created collaborator")
+    return CreateProjectCollaboratorResponse(project=_project_row_to_response(refreshed), persona=_project_persona_row_to_response(persona))
+
+
+@app.get("/api/projects/{project_id}/queries", response_model=ProjectQuerySessionListResponse)
+async def list_project_query_sessions(project_id: int):
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    rows = db.list_project_query_sessions(project_id)
+    return ProjectQuerySessionListResponse(queries=[_project_query_row_to_response(row) for row in rows])
+
+
+@app.post("/api/projects/{project_id}/queries", response_model=ProjectQuerySession)
+async def create_project_query_session(project_id: int, request: CreateProjectQuerySessionRequest):
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    query = (request.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+    title = (request.title or query[:72]).strip() or "Untitled query"
+    row = db.create_project_query_session(project_id, title=title, query=query, state=request.state or {})
+    await log_event_safe("project_query_created", {"project_id": project_id, "query_id": row.get("id"), "title": title})
+    return _project_query_row_to_response(row)
+
+
+@app.put("/api/projects/{project_id}/queries/{query_id}", response_model=ProjectQuerySession)
+async def update_project_query_session(project_id: int, query_id: int, request: UpdateProjectQuerySessionRequest):
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    existing = db.get_project_query_session(query_id)
+    if not existing or int(existing.get("project_id") or 0) != project_id:
+        raise HTTPException(status_code=404, detail="Query session not found")
+    row = db.update_project_query_session(
+        query_id,
+        title=request.title,
+        query=request.query,
+        state=request.state,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Query session not found")
+    return _project_query_row_to_response(row)
+
+
 @app.delete("/api/projects/{project_id}")
 async def delete_project(project_id: int):
     project = db.get_project(project_id)
@@ -1796,7 +1939,7 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
 
     max_results = max(1, min(int(request.max_results or 5), 8))
     try:
-        result = await search_pubmed(
+        result = await search_literature(
             query,
             max_results=max_results,
             project_goal=str(request.project_goal or project.get("project_goal") or ""),
@@ -1821,7 +1964,7 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
         existing = {str(item or "").strip().lower() for item in (request.existing_citations or []) if str(item or "").strip()}
         raw_findings: List[ResearchFinding] = []
         for index, record in enumerate(records, start=1):
-            raw_findings.append(_pubmed_record_to_research_finding(record, index))
+            raw_findings.append(_literature_record_to_research_finding(record, index))
 
         processing = await _synthesize_literature_processing(project, persona, request, records, raw_findings)
         synthesized_findings = processing.get("findings") or raw_findings
@@ -1832,7 +1975,7 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
             findings.append(finding)
 
         trace = LiteratureToolTrace(
-            tool_name="search_pubmed",
+            tool_name="search_literature",
             query=str(result.get("search_query") or result.get("formulated_query") or query),
             result_count=len(records),
             status="success",
@@ -1848,6 +1991,7 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
                 "query": query,
                 "search_query": trace.query,
                 "search_attempts": result.get("attempts") or [],
+                "source_counts": result.get("source_counts") or {},
                 "result_count": len(records),
                 "new_findings": len(findings),
                 "has_processing_summary": bool(processing.get("processing_summary")),
@@ -1862,7 +2006,7 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
         )
     except Exception as exc:
         trace = LiteratureToolTrace(
-            tool_name="search_pubmed",
+            tool_name="search_literature",
             query=query,
             result_count=0,
             status="error",
@@ -1880,6 +2024,144 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
             },
         )
         raise HTTPException(status_code=502, detail=f"Literature fetch failed via {trace.tool_name}: {exc}") from exc
+
+
+@app.post("/api/projects/{project_id}/literature/pdf", response_model=PreparePaperPdfResponse)
+async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfRequest):
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    persona = db.get_persona(request.persona_id)
+    if not persona:
+        raise HTTPException(status_code=404, detail="Persona not found")
+    if not _persona_belongs_to_project(persona, project):
+        raise HTTPException(status_code=400, detail="Selected persona does not belong to this project")
+
+    ids = {
+        "pmid": str((request.finding.source_ids or {}).get("pmid") or "").strip(),
+        "pmcid": str((request.finding.source_ids or {}).get("pmcid") or "").strip(),
+        "doi": str((request.finding.source_ids or {}).get("doi") or "").strip(),
+        "pdf_url": str((request.finding.source_ids or {}).get("pdf_url") or "").strip(),
+    }
+    parsed_ids = extract_paper_ids(
+        request.finding.citation,
+        request.finding.relevance,
+        " ".join(request.finding.labels),
+        " ".join(request.finding.knowns),
+        " ".join(request.finding.unknowns),
+    )
+    ids = {key: ids.get(key) or parsed_ids.get(key, "") for key in ["pmid", "pmcid", "doi", "pdf_url"]}
+    if not ids.get("pmid") and not ids.get("pmcid") and not ids.get("doi"):
+        return PreparePaperPdfResponse(
+            status="error",
+            message="Could not identify a PMID, PMCID, or DOI from this literature finding. Try adding a PMID/PMCID/DOI to the citation or labels.",
+        )
+
+    output_root = Path(os.getenv("PAPER_EVIDENCE_ROOT") or "data/paper_evidence") / f"project_{project_id}"
+    try:
+        download = await download_open_access_pdf(
+            pmid=ids.get("pmid", ""),
+            pmcid=ids.get("pmcid", ""),
+            doi=ids.get("doi", ""),
+            pdf_url=ids.get("pdf_url", ""),
+            output_dir=output_root,
+        )
+        if download.get("status") != "success":
+            return PreparePaperPdfResponse(
+                status="not_open_access",
+                message=str(download.get("message") or "No downloadable open-access PDF was found for this paper."),
+                paper_id=download.get("paper_id"),
+                pmid=download.get("pmid") or ids.get("pmid") or None,
+                pmcid=download.get("pmcid") or ids.get("pmcid") or None,
+                source_pdf_url=download.get("source_pdf_url"),
+            )
+
+        original_pdf_path = Path(str(download["original_pdf_path"]))
+        annotated_pdf_path = original_pdf_path.with_name("annotated.pdf")
+        annotation_result = annotate_pdf_for_objective(
+            pdf_path=original_pdf_path,
+            query=request.query,
+            project_goal=request.project_goal or str(project.get("project_goal") or ""),
+            project_end_product=request.project_end_product or str(project.get("end_product") or ""),
+            project_target_host=request.project_target_host or str(project.get("target_host") or ""),
+            persona_name=request.persona_name or str(persona.get("name") or ""),
+            persona_focus=request.persona_focus or str(((persona.get("persona_json") or {}).get("project_context") or {}).get("focus_area") or ""),
+            objective_title=request.objective_title or "",
+            objective_definition=request.objective_definition or "",
+            objective_signals=request.objective_signals or [],
+            paper_context=" ".join(
+                [
+                    request.finding.citation,
+                    " ".join(request.finding.labels),
+                    " ".join(request.finding.knowns),
+                    " ".join(request.finding.unknowns),
+                    request.finding.relevance,
+                ]
+            ),
+            output_path=annotated_pdf_path,
+            max_annotations=request.max_annotations,
+        )
+        annotations = [PaperAnnotation.model_validate(item) for item in annotation_result.get("annotations", [])]
+        annotation_json_path = annotated_pdf_path.with_name("annotations.json")
+        annotation_json_path.write_text(
+            json.dumps(
+                {
+                    "finding": request.finding.model_dump(),
+                    "query": request.query,
+                    "objective_id": request.objective_id,
+                    "objective_title": request.objective_title,
+                    "annotations": [item.model_dump() for item in annotations],
+                    "insights": annotation_result.get("insights") or [],
+                    "source_pdf_url": download.get("source_pdf_url"),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        paper_id = str(download.get("paper_id") or annotated_pdf_path.parent.name)
+        await log_event_safe(
+            "paper_pdf_annotated",
+            {
+                "project_id": project_id,
+                "persona_id": request.persona_id,
+                "paper_id": paper_id,
+                "pmid": download.get("pmid"),
+                "pmcid": download.get("pmcid"),
+                "annotations": len(annotations),
+                "visual_annotations": bool(annotation_result.get("visual_annotations")),
+            },
+        )
+        return PreparePaperPdfResponse(
+            status="success",
+            message=f"Prepared annotated PDF with {len(annotations)} query/objective-matched passage notes.",
+            paper_id=paper_id,
+            pmid=download.get("pmid") or ids.get("pmid") or None,
+            pmcid=download.get("pmcid") or ids.get("pmcid") or None,
+            source_pdf_url=download.get("source_pdf_url"),
+            original_pdf_path=str(original_pdf_path.resolve()),
+            annotated_pdf_path=str(annotated_pdf_path.resolve()),
+            annotated_pdf_url=f"/api/projects/{project_id}/literature/pdf/{paper_id}/annotated",
+            annotations=annotations,
+            insights=[str(item) for item in (annotation_result.get("insights") or [])],
+            visual_annotations=bool(annotation_result.get("visual_annotations")),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"PDF preparation failed: {exc}") from exc
+
+
+@app.get("/api/projects/{project_id}/literature/pdf/{paper_id}/annotated")
+async def get_annotated_literature_pdf(project_id: int, paper_id: str):
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", paper_id).strip("_")
+    candidate = (Path(os.getenv("PAPER_EVIDENCE_ROOT") or "data/paper_evidence") / f"project_{project_id}" / safe_id / "annotated.pdf").resolve()
+    root = (Path(os.getenv("PAPER_EVIDENCE_ROOT") or "data/paper_evidence") / f"project_{project_id}").resolve()
+    if root not in candidate.parents or not candidate.exists():
+        raise HTTPException(status_code=404, detail="Annotated PDF not found")
+    return FileResponse(
+        str(candidate),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{safe_id}_annotated.pdf"', "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @app.get("/api/projects/{project_id}/execution-runs/latest", response_model=ProjectExecutionRunResponse)

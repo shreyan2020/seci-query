@@ -1,11 +1,9 @@
-import { ExecutionRunPanel } from '@/features/biotech-workspace/components/ExecutionRunPanel';
 import { ResearchWorkTemplateSection } from '@/features/biotech-workspace/components/ResearchWorkTemplateSection';
 import type {
   AgenticPlan,
   ObjectiveCluster,
   PlanStep,
-  ProjectExecutionEvent,
-  ProjectExecutionRun,
+  ResearchFinding,
   ResearchWorkTemplate,
 } from '@/features/biotech-workspace/types';
 import { classNames, getModeVisualKey } from '@/features/biotech-workspace/lib/utils';
@@ -27,6 +25,9 @@ interface WorkingDraftSectionProps {
   literatureElicitationAnswers?: Record<string, string>;
   onLiteratureElicitationAnswerChange?: (question: string, value: string) => void;
   onCaptureLiteratureTacitAnswer?: (question: string) => void;
+  onPreparePaperPdf?: (finding: ResearchFinding) => void;
+  preparingPdfFindingId?: string | null;
+  pdfAnnotationStatus?: string | null;
   reasoningNotes: string;
   onReasoningNotesChange: (value: string) => void;
   agenticPlan: AgenticPlan | null;
@@ -35,11 +36,6 @@ interface WorkingDraftSectionProps {
   onUpdatePlanStep: (stepId: string, patch: Partial<PlanStep>) => void;
   onGeneratePlan: () => void;
   loadingPlan: boolean;
-  executionRun: ProjectExecutionRun | null;
-  executionEvents: ProjectExecutionEvent[];
-  onStartExecution: () => void;
-  onRefreshExecution: () => void;
-  startingExecution: boolean;
 }
 
 export function WorkingDraftSection({
@@ -59,6 +55,9 @@ export function WorkingDraftSection({
   literatureElicitationAnswers,
   onLiteratureElicitationAnswerChange,
   onCaptureLiteratureTacitAnswer,
+  onPreparePaperPdf,
+  preparingPdfFindingId,
+  pdfAnnotationStatus,
   reasoningNotes,
   onReasoningNotesChange,
   agenticPlan,
@@ -67,11 +66,6 @@ export function WorkingDraftSection({
   onUpdatePlanStep,
   onGeneratePlan,
   loadingPlan,
-  executionRun,
-  executionEvents,
-  onStartExecution,
-  onRefreshExecution,
-  startingExecution,
 }: WorkingDraftSectionProps) {
   const selectedPlanStep = agenticPlan?.steps.find((step) => step.id === selectedPlanStepId) || null;
   const modeKey = getModeVisualKey(currentModeTitle);
@@ -166,6 +160,9 @@ export function WorkingDraftSection({
             literatureElicitationAnswers={literatureElicitationAnswers}
             onLiteratureElicitationAnswerChange={onLiteratureElicitationAnswerChange}
             onCaptureLiteratureTacitAnswer={onCaptureLiteratureTacitAnswer}
+            onPreparePaperPdf={onPreparePaperPdf}
+            preparingPdfFindingId={preparingPdfFindingId}
+            pdfAnnotationStatus={pdfAnnotationStatus}
           />
 
           <div className="relative mt-5 rounded-[1.5rem] border border-slate-200 bg-white/85 p-4">
@@ -187,14 +184,6 @@ export function WorkingDraftSection({
               }
             />
           </div>
-
-          <ExecutionRunPanel
-            executionRun={executionRun}
-            executionEvents={executionEvents}
-            startingExecution={startingExecution}
-            onStartExecution={onStartExecution}
-            onRefreshExecution={onRefreshExecution}
-          />
 
           {!agenticPlan ? (
             <div className="relative mt-5 rounded-[1.5rem] border border-dashed border-slate-300 bg-white/75 p-8 text-center text-sm text-slate-600">

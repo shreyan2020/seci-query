@@ -16,6 +16,18 @@ interface ObjectiveClusteringSectionProps {
   globalQuestionAnswers: Record<string, string>;
   onGlobalQuestionChange: (question: string, value: string) => void;
   onSetObjectivePickerCollapsed: (collapsed: boolean) => void;
+  showManualObjectiveForm: boolean;
+  manualObjective: {
+    title: string;
+    subtitle: string;
+    definition: string;
+    signals: string;
+    facet_questions: string;
+    exemplar_answer: string;
+  };
+  onToggleManualObjectiveForm: () => void;
+  onManualObjectiveChange: (field: keyof ObjectiveClusteringSectionProps['manualObjective'], value: string) => void;
+  onCreateManualObjective: () => void;
 }
 
 export function ObjectiveClusteringSection({
@@ -33,6 +45,11 @@ export function ObjectiveClusteringSection({
   globalQuestionAnswers,
   onGlobalQuestionChange,
   onSetObjectivePickerCollapsed,
+  showManualObjectiveForm,
+  manualObjective,
+  onToggleManualObjectiveForm,
+  onManualObjectiveChange,
+  onCreateManualObjective,
 }: ObjectiveClusteringSectionProps) {
   const modeCardTone = (label: string, active: boolean) => {
     const key = getModeVisualKey(label);
@@ -65,6 +82,80 @@ export function ObjectiveClusteringSection({
             {loadingObjectiveClusters ? 'Generating Modes...' : objectiveClusters.length > 0 ? 'Refresh Objective Modes' : 'Generate Objective Modes'}
           </button>
         </div>
+      </div>
+
+      <div className="mt-5 rounded-[1.4rem] border border-dashed border-slate-300 bg-slate-50 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Manual objective mode</div>
+            <div className="mt-1 text-sm leading-6 text-slate-600">
+              Add your own lens if the generated clusters miss the way this query should be handled.
+            </div>
+          </div>
+          <button
+            onClick={onToggleManualObjectiveForm}
+            className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
+          >
+            {showManualObjectiveForm ? 'Hide fields' : 'Add objective'}
+          </button>
+        </div>
+        {showManualObjectiveForm && (
+          <div className="mt-3 space-y-3">
+            <div className="grid gap-3 lg:grid-cols-2">
+              <input
+                value={manualObjective.title}
+                onChange={(event) => onManualObjectiveChange('title', event.target.value)}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                placeholder="Title, e.g. Enzyme design validation"
+              />
+              <input
+                value={manualObjective.subtitle}
+                onChange={(event) => onManualObjectiveChange('subtitle', event.target.value)}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                placeholder="Short subtitle"
+              />
+            </div>
+            <textarea
+              value={manualObjective.definition}
+              onChange={(event) => onManualObjectiveChange('definition', event.target.value)}
+              rows={3}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+              placeholder="Define how this objective should condition the workspace"
+            />
+            <div className="grid gap-3 lg:grid-cols-3">
+              <textarea
+                value={manualObjective.signals}
+                onChange={(event) => onManualObjectiveChange('signals', event.target.value)}
+                rows={3}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                placeholder="Signals, one per line"
+              />
+              <textarea
+                value={manualObjective.facet_questions}
+                onChange={(event) => onManualObjectiveChange('facet_questions', event.target.value)}
+                rows={3}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                placeholder="Refinement questions, one per line"
+              />
+              <textarea
+                value={manualObjective.exemplar_answer}
+                onChange={(event) => onManualObjectiveChange('exemplar_answer', event.target.value)}
+                rows={3}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                placeholder="What a good answer should look like"
+              />
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={onCreateManualObjective}
+                disabled={!manualObjective.title.trim() || !manualObjective.definition.trim()}
+                className="rounded-2xl bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Create objective
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {objectiveClusters.length === 0 ? (

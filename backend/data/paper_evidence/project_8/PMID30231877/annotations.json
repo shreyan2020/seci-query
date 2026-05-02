@@ -1,0 +1,37 @@
+{
+  "finding": {
+    "id": "lit_fetch_2",
+    "citation": "Production of a potential multistrain probiotic in co-culture conditions using agro-industrial by-products-based medium for fish nutrition.. BMC biotechnology. 2023. PMID: 38102630",
+    "labels": [
+      "cross-species transfer",
+      "objective-conditioned",
+      "pdf annotated"
+    ],
+    "knowns": [
+      "T",
+      "h",
+      "e",
+      "s",
+      "t"
+    ],
+    "unknowns": [
+      "T",
+      "h",
+      "e",
+      "e",
+      "x"
+    ],
+    "relevance": "This highlights the importance of selecting appropriate yeast strains with native biosynthetic capabilities.\n\nPDF annotation notes:\n- Page 1: \u00a9 The Author(s) 2018. This article is distributed under the terms of the Creative Commons Attribution 4.0 International License\n- Page 1: provided you give appropriate credit to the original author(s) and the source, provide a link to the Creative Commons license,\n- Page 1: cation of nanomaterials in improving both the efficacy of novel and old drugs (e.g., natural products) and selective\n- Page 1: diagnosis through disease marker molecules. The opportunities and challenges of nanomedicines in drug delivery\n- Page 1: and indicate if changes were made. The Creative Commons Public Domain Dedication waiver (http://creat\u200b",
+    "source_ids": {
+      "pmid": "30231877",
+      "doi": "10.1186/s12951-018-0392-8",
+      "pdf_url": "https://jnanobiotechnology.biomedcentral.com/track/pdf/10.1186/s12951-018-0392-8"
+    }
+  },
+  "query": "What are the key successful common strategies and examples in Resveratrol production? What are the latest improvement options / key challenges in the future?",
+  "objective_id": "obj_3",
+  "objective_title": "Novel Pathways",
+  "annotations": [],
+  "insights": [],
+  "source_pdf_url": "https://jnanobiotechnology.biomedcentral.com/track/pdf/10.1186/s12951-018-0392-8"
+}

@@ -1,0 +1,132 @@
+{
+  "finding": {
+    "id": "finding_10_1186_s12934_020_01401_5",
+    "citation": "De novo resveratrol production through modular engineering of an Escherichia coli-Saccharomyces cerevisiae co-culture.. Microbial cell factories. 2020. PMID: 32664999",
+    "labels": [
+      "pubmed",
+      "literature fetch",
+      "2020",
+      "PMID: 32664999",
+      "PMCID: PMC7362445",
+      "DOI: 10.1186/s12934-020-01401-5"
+    ],
+    "knowns": [
+      "De novo resveratrol production through modular engineering of an Escherichia coli-Saccharomyces cerevisiae co-culture."
+    ],
+    "unknowns": [],
+    "relevance": "BACKGROUND: Resveratrol is a plant secondary metabolite with diverse, potential health-promoting benefits. Due to its nutraceutical merit, bioproduction of resveratrol via microbial engineering has gained increasing attention and provides an alternative to unsustainable chemical synthesis and straight extraction from plants. However, many studies on microbial resveratrol production were implemented with the addition of water-insoluble phenylalanine or tyrosine-based precursors to the medium, limiting in the sustainable development of bioproduction.\nRESULTS: Here we present a novel coculture platform where two distinct metabolic background species were modularly engineered for the combined total and de novo biosynthesis of resveratrol. In this scenario, the upstream Escherichia coli module is capable of excreting p-coumaric acid into the surrounding culture media through constitutive over",
+    "source_ids": {
+      "pmid": "32664999",
+      "pmcid": "PMC7362445",
+      "doi": "10.1186/s12934-020-01401-5"
+    }
+  },
+  "query": "What are the key successful common strategies and examples in Resveratrol production? What are the latest improvement options / key challenges in the future?",
+  "objective_id": "obj_3",
+  "objective_title": "Novel Pathways",
+  "annotations": [
+    {
+      "page": 1,
+      "snippet": "to its nutraceutical merit, bioproduction of resveratrol via microbial engineering has gained increasing attention",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Novel Pathways'); matched evidence terms: resveratrol, production, microbial, engineering, bioproduction. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "production",
+        "microbial",
+        "engineering",
+        "bioproduction"
+      ],
+      "score": 130.228
+    },
+    {
+      "page": 3,
+      "snippet": "microbial co-culture for the production of resveratrol.",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Novel Pathways'); matched evidence terms: resveratrol, production, microbial, co-culture. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "production",
+        "microbial",
+        "co-culture"
+      ],
+      "score": 119.11
+    },
+    {
+      "page": 6,
+      "snippet": "performance of a resveratrol production and b p-coumaric acid accumulation using co-cultures with altered inoculation cell number ratios,",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Novel Pathways'); matched evidence terms: resveratrol, production, co-culture, cell. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "production",
+        "co-culture",
+        "cell"
+      ],
+      "score": 105.274
+    },
+    {
+      "page": 1,
+      "snippet": "studies on microbial resveratrol production were implemented with the addition of water-insoluble phenylalanine or",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Novel Pathways'); matched evidence terms: resveratrol, production, microbial. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "production",
+        "microbial"
+      ],
+      "score": 105.228
+    },
+    {
+      "page": 1,
+      "snippet": "resveratrol biosynthesis, which highlights its potential for production of other p-coumaric-acid or resveratrol derived",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Novel Pathways'); matched evidence terms: resveratrol, production, synthesis, biosynthesis. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "production",
+        "synthesis",
+        "biosynthesis"
+      ],
+      "score": 98.238
+    },
+    {
+      "page": 9,
+      "snippet": "of a co-culture approach for production of resveratrol.",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Novel Pathways'); matched evidence terms: resveratrol, production, co-culture. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "production",
+        "co-culture"
+      ],
+      "score": 98.11
+    },
+    {
+      "page": 1,
+      "snippet": "Keywords: Resveratrol, Modular metabolic engineering, Synthetic co-culture system",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Novel Pathways'); matched evidence terms: resveratrol, engineering, co-culture, modular, metabolic. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "engineering",
+        "co-culture",
+        "modular",
+        "metabolic"
+      ],
+      "score": 92.162
+    },
+    {
+      "page": 12,
+      "snippet": "15. Wang J, Yang Y, Yan Y. Bioproduction of Resveratrol. In: Schwab W, Lange",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Novel Pathways'); matched evidence terms: resveratrol, production, bioproduction. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "production",
+        "bioproduction"
+      ],
+      "score": 92.152
+    }
+  ],
+  "insights": [
+    "Page 1: to its nutraceutical merit, bioproduction of resveratrol via microbial engineering has gained increasing attention",
+    "Page 3: microbial co-culture for the production of resveratrol.",
+    "Page 6: performance of a resveratrol production and b p-coumaric acid accumulation using co-cultures with altered inoculation cell number ratios,",
+    "Page 1: studies on microbial resveratrol production were implemented with the addition of water-insoluble phenylalanine or",
+    "Page 1: resveratrol biosynthesis, which highlights its potential for production of other p-coumaric-acid or resveratrol derived"
+  ],
+  "source_pdf_url": "https://europepmc.org/articles/PMC7362445?pdf=render"
+}

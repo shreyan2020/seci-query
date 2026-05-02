@@ -13,20 +13,26 @@ import { WorkspaceMemoryPanel } from '@/features/biotech-workspace/components/Wo
 import { WorkflowStateSidebar } from '@/features/biotech-workspace/components/WorkflowStateSidebar';
 import { WorkspaceHeader } from '@/features/biotech-workspace/components/WorkspaceHeader';
 import {
+  API_BASE,
   clusterObjectives,
   createProject,
+  createProjectCollaborator,
+  createProjectQuery,
   deleteProject,
   fetchExecutionRun,
   fetchLatestExecutionRun,
   fetchProjectLiterature,
+  fetchProjectQueries,
   fetchProjects,
   fetchWorkspaceMemory,
   fetchWorkspaceState,
   generateProjectPlan,
   inferWorkspaceMemory,
+  preparePaperPdf,
   saveWorkspaceMemory,
   saveWorkspaceState,
   startExecutionRun,
+  updateProjectQuery,
 } from '@/features/biotech-workspace/lib/api';
 import {
   buildPlanningReasoningNotes,
@@ -46,12 +52,85 @@ import type {
   ProjectExecutionRun,
   Project,
   ProjectFormState,
+  ProjectQuerySession,
+  ResearchFinding,
   ResearchWorkTemplate,
   StatusState,
   TacitMemoryItem,
 } from '@/features/biotech-workspace/types';
 
 type FlowStep = 'collaborator' | 'query' | 'objective' | 'workspace';
+type DesktopOpenPathResult = { ok: boolean; error?: string };
+type PdfViewerState = {
+  findingId: string;
+  title: string;
+  url: string;
+  annotatedPath?: string | null;
+  insights: string[];
+  questions: string[];
+} | null;
+type ManualCollaboratorForm = {
+  name: string;
+  role: string;
+  workflow_stage: string;
+  focus_area: string;
+  workflow_focus: string;
+  goals: string;
+  starter_questions: string;
+};
+type ManualObjectiveForm = {
+  title: string;
+  subtitle: string;
+  definition: string;
+  signals: string;
+  facet_questions: string;
+  exemplar_answer: string;
+};
+
+function stableFindingKey(finding: ResearchFinding) {
+  const ids = finding.source_ids || {};
+  const sourceKey = ids.doi || ids.pmid || ids.pmcid || ids.pdf_url || finding.citation || finding.id;
+  return sourceKey.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 80) || `finding_${Date.now()}`;
+}
+
+function uniqueFindingId(finding: ResearchFinding, existingIds: Set<string>, index: number) {
+  const base = stableFindingKey(finding) || `finding_${index + 1}`;
+  let candidate = `finding_${base}`;
+  let suffix = 2;
+  while (existingIds.has(candidate)) {
+    candidate = `finding_${base}_${suffix}`;
+    suffix += 1;
+  }
+  existingIds.add(candidate);
+  return candidate;
+}
+
+const emptyManualCollaborator: ManualCollaboratorForm = {
+  name: '',
+  role: '',
+  workflow_stage: 'analytics',
+  focus_area: '',
+  workflow_focus: '',
+  goals: '',
+  starter_questions: '',
+};
+
+const emptyManualObjective: ManualObjectiveForm = {
+  title: '',
+  subtitle: '',
+  definition: '',
+  signals: '',
+  facet_questions: '',
+  exemplar_answer: '',
+};
+
+declare global {
+  interface Window {
+    desktopApp?: {
+      openPath?: (targetPath: string) => Promise<DesktopOpenPathResult>;
+    };
+  }
+}
 
 export default function BiotechProjectWorkspace() {
   const router = useRouter();
@@ -92,6 +171,20 @@ export default function BiotechProjectWorkspace() {
   const [literatureProcessingSummary, setLiteratureProcessingSummary] = useState<string | null>(null);
   const [literatureElicitationQuestions, setLiteratureElicitationQuestions] = useState<string[]>([]);
   const [literatureElicitationAnswers, setLiteratureElicitationAnswers] = useState<Record<string, string>>({});
+  const [preparingPdfFindingId, setPreparingPdfFindingId] = useState<string | null>(null);
+  const [pdfAnnotationStatus, setPdfAnnotationStatus] = useState<string | null>(null);
+  const [pdfViewer, setPdfViewer] = useState<PdfViewerState>(null);
+  const [memoryDrawerOpen, setMemoryDrawerOpen] = useState(false);
+  const [projectQueries, setProjectQueries] = useState<ProjectQuerySession[]>([]);
+  const [activeQueryId, setActiveQueryId] = useState<number | ''>('');
+  const [newQueryText, setNewQueryText] = useState('');
+  const [showNewQueryForm, setShowNewQueryForm] = useState(false);
+  const [creatingQuery, setCreatingQuery] = useState(false);
+  const [creatingManualCollaborator, setCreatingManualCollaborator] = useState(false);
+  const [manualCollaborator, setManualCollaborator] = useState<ManualCollaboratorForm>(emptyManualCollaborator);
+  const [showManualCollaboratorForm, setShowManualCollaboratorForm] = useState(false);
+  const [showManualObjectiveForm, setShowManualObjectiveForm] = useState(false);
+  const [manualObjective, setManualObjective] = useState<ManualObjectiveForm>(emptyManualObjective);
   const [loadingWorkspace, setLoadingWorkspace] = useState(false);
   const [collaboratorPickerCollapsed, setCollaboratorPickerCollapsed] = useState(false);
   const [objectivePickerCollapsed, setObjectivePickerCollapsed] = useState(false);
@@ -141,10 +234,11 @@ export default function BiotechProjectWorkspace() {
   const workspaceMemoryKey = useMemo(() => {
     const parts = [
       selectedProject?.scope_id || (selectedProject ? `project-${selectedProject.id}` : 'no-project'),
+      activeQueryId === '' ? 'no-query' : `query-${activeQueryId}`,
       selectedPersonaId === '' ? 'no-persona' : `persona-${selectedPersonaId}`,
     ];
     return parts.join('__').toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
-  }, [selectedProject?.id, selectedProject?.scope_id, selectedPersonaId]);
+  }, [selectedProject?.id, selectedProject?.scope_id, activeQueryId, selectedPersonaId]);
   const explicitWorkspaceState = useMemo<Record<string, unknown>>(
     () => ({
       selected_project: selectedProject,
@@ -187,6 +281,52 @@ export default function BiotechProjectWorkspace() {
       executionRun,
     ]
   );
+  const workspaceDigest = useMemo(() => {
+    const findingNotes = researchWorkTemplate.literature_findings
+      .slice(0, 6)
+      .map((finding, index) => {
+        const knowns = finding.knowns.slice(0, 2).join('; ');
+        const unknowns = finding.unknowns.slice(0, 2).join('; ');
+        return `${index + 1}. ${finding.citation || 'Untitled source'}${knowns ? `\nKnown: ${knowns}` : ''}${unknowns ? `\nOpen: ${unknowns}` : ''}${finding.relevance ? `\nNotes: ${finding.relevance.slice(0, 400)}` : ''}`;
+      })
+      .join('\n\n');
+    const userInputs = [
+      ...Object.entries(clarifyingAnswers),
+      ...Object.entries(objectiveAnswers),
+      ...Object.entries(globalQuestionAnswers),
+      ...Object.entries(literatureElicitationAnswers),
+    ]
+      .filter(([, value]) => String(value || '').trim())
+      .map(([question, answer]) => `- ${question}: ${answer}`)
+      .join('\n');
+    return [
+      `Project: ${selectedProject?.name || 'No project selected'}`,
+      `Goal: ${selectedProject?.project_goal || 'Not set'}`,
+      `Collaborator: ${selectedPersona?.name || 'Not selected'}`,
+      `Objective: ${selectedObjective?.title || 'Not selected'}`,
+      `Working question: ${focusQuestion || researchWorkTemplate.initial_query || 'Not set'}`,
+      literatureProcessingSummary ? `Literature processing: ${literatureProcessingSummary}` : '',
+      findingNotes ? `Literature insights:\n${findingNotes}` : '',
+      userInputs ? `User inputs and tacit judgments:\n${userInputs}` : '',
+      reasoningNotes ? `Reasoning notes:\n${reasoningNotes}` : '',
+      handoffSummary ? `Handoff summary:\n${handoffSummary}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }, [
+    researchWorkTemplate,
+    clarifyingAnswers,
+    objectiveAnswers,
+    globalQuestionAnswers,
+    literatureElicitationAnswers,
+    selectedProject,
+    selectedPersona?.name,
+    selectedObjective?.title,
+    focusQuestion,
+    literatureProcessingSummary,
+    reasoningNotes,
+    handoffSummary,
+  ]);
   const workspaceStatusMessage = loadingWorkspace
     ? 'Loading saved workspace...'
     : workspaceSaveState === 'saving'
@@ -220,6 +360,74 @@ export default function BiotechProjectWorkspace() {
     window.requestAnimationFrame(() => {
       target.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
+  };
+  const resetQueryDependentState = (nextQuery = '') => {
+    setFocusQuestion(nextQuery);
+    setSelectedPersonaId('');
+    setCollaboratorPickerCollapsed(false);
+    setObjectiveClusters([]);
+    setSelectedObjectiveId('');
+    setGlobalQuestions([]);
+    setObjectiveAnswers({});
+    setGlobalQuestionAnswers({});
+    setClarifyingAnswers({});
+    setReasoningNotes('');
+    setResearchWorkTemplate(createEmptyResearchWorkTemplate(nextQuery));
+    setAgenticPlan(null);
+    setSelectedPlanStepId('');
+    setLiteratureToolStatus(null);
+    setLiteratureObjectiveLens(null);
+    setLiteratureProcessingSummary(null);
+    setLiteratureElicitationQuestions([]);
+    setLiteratureElicitationAnswers({});
+    setActiveFlowStep('collaborator');
+  };
+  const makeQueryTitle = (query: string, fallback: string) => {
+    const trimmed = query.trim();
+    return trimmed ? trimmed.slice(0, 72) : fallback;
+  };
+  const currentQueryState = (): Record<string, unknown> => ({
+    selected_persona_id: selectedPersonaId === '' ? null : Number(selectedPersonaId),
+    active_flow_step: activeFlowStep,
+    objective_clusters: objectiveClusters,
+    selected_objective_id: selectedObjectiveId,
+    global_questions: globalQuestions,
+    objective_answers: objectiveAnswers,
+    global_question_answers: globalQuestionAnswers,
+    clarifying_answers: clarifyingAnswers,
+    reasoning_notes: reasoningNotes,
+    research_work_template: researchWorkTemplate,
+    agentic_plan: agenticPlan,
+    selected_plan_step_id: selectedPlanStepId,
+    literature_tool_status: literatureToolStatus,
+    literature_objective_lens: literatureObjectiveLens,
+    literature_processing_summary: literatureProcessingSummary,
+    literature_elicitation_questions: literatureElicitationQuestions,
+    literature_elicitation_answers: literatureElicitationAnswers,
+  });
+  const restoreQueryState = (query: ProjectQuerySession) => {
+    const state = query.state || {};
+    const personaId = typeof state.selected_persona_id === 'number' ? state.selected_persona_id : '';
+    setFocusQuestion(query.query || '');
+    setSelectedPersonaId(personaId);
+    setActiveFlowStep((state.active_flow_step as FlowStep) || (personaId === '' ? 'collaborator' : 'query'));
+    setCollaboratorPickerCollapsed(Boolean(personaId));
+    setObjectiveClusters((state.objective_clusters as ObjectiveCluster[]) || []);
+    setSelectedObjectiveId(typeof state.selected_objective_id === 'string' ? state.selected_objective_id : '');
+    setGlobalQuestions((state.global_questions as string[]) || []);
+    setObjectiveAnswers((state.objective_answers as Record<string, string>) || {});
+    setGlobalQuestionAnswers((state.global_question_answers as Record<string, string>) || {});
+    setClarifyingAnswers((state.clarifying_answers as Record<string, string>) || {});
+    setReasoningNotes(typeof state.reasoning_notes === 'string' ? state.reasoning_notes : '');
+    setResearchWorkTemplate((state.research_work_template as ResearchWorkTemplate) || createEmptyResearchWorkTemplate(query.query));
+    setAgenticPlan((state.agentic_plan as AgenticPlan | null) || null);
+    setSelectedPlanStepId(typeof state.selected_plan_step_id === 'string' ? state.selected_plan_step_id : '');
+    setLiteratureToolStatus(typeof state.literature_tool_status === 'string' ? state.literature_tool_status : null);
+    setLiteratureObjectiveLens(typeof state.literature_objective_lens === 'string' ? state.literature_objective_lens : null);
+    setLiteratureProcessingSummary(typeof state.literature_processing_summary === 'string' ? state.literature_processing_summary : null);
+    setLiteratureElicitationQuestions((state.literature_elicitation_questions as string[]) || []);
+    setLiteratureElicitationAnswers((state.literature_elicitation_answers as Record<string, string>) || {});
+    setObjectivePickerCollapsed(Boolean(state.selected_objective_id));
   };
 
   const loadProjects = async (preferredProjectId?: number) => {
@@ -264,6 +472,8 @@ export default function BiotechProjectWorkspace() {
   useEffect(() => {
     if (!selectedProject) {
       setSelectedPersonaId('');
+      setProjectQueries([]);
+      setActiveQueryId('');
       return;
     }
 
@@ -277,6 +487,78 @@ export default function BiotechProjectWorkspace() {
       return '';
     });
   }, [selectedProject, routePersonaId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadQueries = async () => {
+      if (!selectedProject) {
+        return;
+      }
+      try {
+        const response = await fetchProjectQueries(selectedProject.id);
+        if (cancelled) return;
+        const rows = response.queries || [];
+        setProjectQueries(rows);
+        if (rows.length > 0) {
+          setActiveQueryId(rows[0].id);
+          restoreQueryState(rows[0]);
+        } else {
+          setActiveQueryId('');
+          resetQueryDependentState('');
+          setActiveFlowStep('query');
+          setShowNewQueryForm(true);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load project queries' });
+        }
+      }
+    };
+    loadQueries().catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProject?.id]);
+
+  useEffect(() => {
+    if (!selectedProject || activeQueryId === '') {
+      return;
+    }
+    const timer = window.setTimeout(async () => {
+      try {
+        const saved = await updateProjectQuery(selectedProject.id, activeQueryId, {
+          title: makeQueryTitle(focusQuestion, 'Untitled query'),
+          query: focusQuestion,
+          state: currentQueryState(),
+        });
+        setProjectQueries((current) => current.map((item) => (item.id === saved.id ? saved : item)));
+      } catch {
+        // Workspace-level autosave still protects the active draft; query session save can retry on the next edit.
+      }
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [
+    selectedProject?.id,
+    activeQueryId,
+    focusQuestion,
+    selectedPersonaId,
+    activeFlowStep,
+    JSON.stringify(objectiveClusters),
+    selectedObjectiveId,
+    JSON.stringify(globalQuestions),
+    JSON.stringify(objectiveAnswers),
+    JSON.stringify(globalQuestionAnswers),
+    JSON.stringify(clarifyingAnswers),
+    reasoningNotes,
+    JSON.stringify(researchWorkTemplate),
+    JSON.stringify(agenticPlan),
+    selectedPlanStepId,
+    literatureToolStatus,
+    literatureObjectiveLens,
+    literatureProcessingSummary,
+    JSON.stringify(literatureElicitationQuestions),
+    JSON.stringify(literatureElicitationAnswers),
+  ]);
 
   useEffect(() => {
     if (!selectedPersona) {
@@ -329,14 +611,14 @@ export default function BiotechProjectWorkspace() {
     setTacitState([]);
     setHandoffSummary('');
     setMemoryStatus('loading memory...');
-    setActiveFlowStep(selectedPersonaId === '' ? 'collaborator' : 'query');
-  }, [selectedProjectId, selectedPersonaId]);
+    setActiveFlowStep('query');
+  }, [selectedProjectId]);
 
   useEffect(() => {
     let cancelled = false;
 
     const loadWorkspace = async () => {
-      if (!selectedProject || !selectedPersona || selectedPersonaId === '') {
+      if (!selectedProject || !selectedPersona || selectedPersonaId === '' || activeQueryId !== '') {
         return;
       }
 
@@ -390,7 +672,7 @@ export default function BiotechProjectWorkspace() {
     return () => {
       cancelled = true;
     };
-  }, [selectedProject?.id, selectedPersona?.persona_id, selectedPersonaId]);
+  }, [selectedProject?.id, selectedPersona?.persona_id, selectedPersonaId, activeQueryId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -419,7 +701,7 @@ export default function BiotechProjectWorkspace() {
   }, [selectedProject?.id, selectedPersona?.persona_id, selectedPersonaId]);
 
   useEffect(() => {
-    if (!workspaceReadyForSave || loadingWorkspace || !selectedProject || !selectedPersona || selectedPersonaId === '') {
+    if (!workspaceReadyForSave || loadingWorkspace || !selectedProject || !selectedPersona || selectedPersonaId === '' || activeQueryId !== '') {
       return;
     }
 
@@ -450,6 +732,7 @@ export default function BiotechProjectWorkspace() {
     selectedProject?.id,
     selectedPersona?.persona_id,
     selectedPersonaId,
+    activeQueryId,
     focusQuestion,
     JSON.stringify(clarifyingAnswers),
     reasoningNotes,
@@ -565,8 +848,9 @@ export default function BiotechProjectWorkspace() {
       router.push(`/?projectId=${response.project.id}`);
       setSelectedProjectId(response.project.id);
       setSelectedPersonaId('');
-      setActiveFlowStep('collaborator');
-      setFocusQuestion(defaultFocusQuestion(response.project, null));
+      setActiveFlowStep('query');
+      setFocusQuestion('');
+      setShowNewQueryForm(true);
       setReasoningNotes('');
       setStatus({
         type: 'success',
@@ -582,6 +866,117 @@ export default function BiotechProjectWorkspace() {
   const handleOpenProject = (projectId: number) => {
     router.push(`/?projectId=${projectId}`);
     setSelectedProjectId(projectId);
+  };
+
+  const handleCreateProjectQuery = async () => {
+    if (!selectedProject) {
+      return;
+    }
+    const query = newQueryText.trim();
+    if (!query) {
+      setStatus({ type: 'error', message: 'Write the query before creating the investigation.' });
+      return;
+    }
+    setCreatingQuery(true);
+    try {
+      const created = await createProjectQuery(selectedProject.id, {
+        title: makeQueryTitle(query, `Investigation ${projectQueries.length + 1}`),
+        query,
+        state: {},
+      });
+      setProjectQueries((current) => [created, ...current]);
+      setActiveQueryId(created.id);
+      restoreQueryState(created);
+      setNewQueryText('');
+      setShowNewQueryForm(false);
+      setStatus({ type: 'success', message: 'Created a new query. Choose or create a collaborator next.' });
+    } catch (error) {
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to create query' });
+    } finally {
+      setCreatingQuery(false);
+    }
+  };
+
+  const handleSelectProjectQuery = (queryId: number) => {
+    const next = projectQueries.find((item) => item.id === queryId);
+    if (!next) return;
+    setActiveQueryId(next.id);
+    restoreQueryState(next);
+    setStatus({ type: 'info', message: 'Switched query. Collaborator, objective, and evidence workspace are ready for this investigation.' });
+  };
+
+  const handleManualCollaboratorChange = (field: keyof ManualCollaboratorForm, value: string) => {
+    setManualCollaborator((current) => ({ ...current, [field]: value }));
+  };
+
+  const splitManualLines = (value: string) =>
+    value
+      .split('\n')
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const handleCreateManualCollaborator = async () => {
+    if (!selectedProject) {
+      setStatus({ type: 'error', message: 'Open a project before creating a collaborator.' });
+      return;
+    }
+    if (!manualCollaborator.name.trim()) {
+      setStatus({ type: 'error', message: 'Name the collaborator before creating it.' });
+      return;
+    }
+
+    setCreatingManualCollaborator(true);
+    setStatus({ type: 'info', message: 'Creating manual project collaborator...' });
+    try {
+      const response = await createProjectCollaborator(selectedProject.id, {
+        name: manualCollaborator.name,
+        role: manualCollaborator.role || 'workflow_partner',
+        workflow_stage: manualCollaborator.workflow_stage,
+        focus_area: manualCollaborator.focus_area,
+        workflow_focus: splitManualLines(manualCollaborator.workflow_focus),
+        goals: splitManualLines(manualCollaborator.goals),
+        starter_questions: splitManualLines(manualCollaborator.starter_questions),
+      });
+      setProjects((current) => current.map((project) => (project.id === response.project.id ? response.project : project)));
+      setSelectedPersonaId(response.persona.persona_id);
+      setManualCollaborator(emptyManualCollaborator);
+      setShowManualCollaboratorForm(false);
+      setActiveFlowStep('objective');
+      scrollToSection(objectiveSectionRef);
+      setStatus({ type: 'success', message: `Created and selected ${response.persona.name}.` });
+    } catch (error) {
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to create collaborator' });
+    } finally {
+      setCreatingManualCollaborator(false);
+    }
+  };
+
+  const handleManualObjectiveChange = (field: keyof ManualObjectiveForm, value: string) => {
+    setManualObjective((current) => ({ ...current, [field]: value }));
+  };
+
+  const handleCreateManualObjective = () => {
+    if (!manualObjective.title.trim() || !manualObjective.definition.trim()) {
+      setStatus({ type: 'error', message: 'Add at least a title and definition for the objective.' });
+      return;
+    }
+    const next: ObjectiveCluster = {
+      id: `manual_${manualObjective.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 48) || Date.now()}`,
+      title: manualObjective.title.trim(),
+      subtitle: manualObjective.subtitle.trim() || 'User-defined objective mode',
+      definition: manualObjective.definition.trim(),
+      signals: splitManualLines(manualObjective.signals),
+      facet_questions: splitManualLines(manualObjective.facet_questions),
+      exemplar_answer: manualObjective.exemplar_answer.trim() || 'Use this objective lens to structure the next workspace output.',
+    };
+    setObjectiveClusters((current) => [next, ...current.filter((item) => item.id !== next.id)]);
+    setSelectedObjectiveId(next.id);
+    setObjectivePickerCollapsed(true);
+    setShowManualObjectiveForm(false);
+    setManualObjective(emptyManualObjective);
+    setActiveFlowStep('workspace');
+    scrollToSection(draftSectionRef);
+    setStatus({ type: 'success', message: `Created and selected objective mode: ${next.title}.` });
   };
 
   const handleDeleteProject = async (project: Project) => {
@@ -616,6 +1011,11 @@ export default function BiotechProjectWorkspace() {
     const queryText = focusQuestion.trim() || selectedProject?.project_goal?.trim() || '';
     if (!queryText) {
       setStatus({ type: 'error', message: 'Add a working question before clustering objective angles.' });
+      return;
+    }
+    if (!selectedPersona) {
+      setStatus({ type: 'error', message: 'Choose or create a collaborator before generating objective modes.' });
+      setActiveFlowStep('collaborator');
       return;
     }
 
@@ -660,8 +1060,8 @@ export default function BiotechProjectWorkspace() {
   const handleSelectPersona = (personaId: number) => {
     setSelectedPersonaId(personaId);
     setCollaboratorPickerCollapsed(true);
-    setActiveFlowStep('query');
-    scrollToSection(querySectionRef);
+    setActiveFlowStep('objective');
+    scrollToSection(objectiveSectionRef);
   };
 
   const handleSelectObjective = (objectiveId: string) => {
@@ -672,8 +1072,8 @@ export default function BiotechProjectWorkspace() {
   };
 
   const handleRefineQuery = () => {
-    setActiveFlowStep('query');
-    scrollToSection(querySectionRef);
+    setShowNewQueryForm(true);
+    setStatus({ type: 'info', message: 'Use the project query panel to create or switch investigation queries.' });
   };
 
   const handleChooseAnotherCollaborator = () => {
@@ -747,8 +1147,8 @@ export default function BiotechProjectWorkspace() {
     }
 
     setFetchingLiterature(true);
-    setLiteratureToolStatus('Calling search_pubmed...');
-    setStatus({ type: 'info', message: 'Fetching literature with search_pubmed...' });
+    setLiteratureToolStatus('Calling multi-source literature search...');
+    setStatus({ type: 'info', message: 'Fetching literature with PubMed, Semantic Scholar, OpenAlex, and Crossref...' });
     try {
       const response = await fetchProjectLiterature(selectedProject.id, {
         persona_id: Number(selectedPersonaId),
@@ -769,7 +1169,10 @@ export default function BiotechProjectWorkspace() {
         existing_citations: researchWorkTemplate.literature_findings.map((item) => item.citation).filter(Boolean),
       });
       const existing = new Set(researchWorkTemplate.literature_findings.map((item) => item.citation.trim().toLowerCase()).filter(Boolean));
-      const newFindings = (response.findings || []).filter((item) => !existing.has(item.citation.trim().toLowerCase()));
+      const existingIds = new Set(researchWorkTemplate.literature_findings.map((item) => item.id));
+      const newFindings = (response.findings || [])
+        .filter((item) => !existing.has(item.citation.trim().toLowerCase()))
+        .map((item, index) => ({ ...item, id: uniqueFindingId(item, existingIds, index) }));
       setResearchWorkTemplate((current) => ({
         ...current,
         initial_query: current.initial_query.trim() || queryText,
@@ -789,6 +1192,83 @@ export default function BiotechProjectWorkspace() {
       setStatus({ type: 'error', message });
     } finally {
       setFetchingLiterature(false);
+    }
+  };
+
+  const handlePreparePaperPdf = async (finding: ResearchFinding) => {
+    if (!selectedProject || !selectedPersona || selectedPersonaId === '') {
+      setStatus({ type: 'error', message: 'Select a project persona before preparing an annotated PDF.' });
+      return;
+    }
+    const queryText = researchWorkTemplate.initial_query.trim() || focusQuestion.trim() || selectedProject.project_goal.trim();
+    if (!queryText) {
+      setStatus({ type: 'error', message: 'Add an initial query or working question before annotating a PDF.' });
+      return;
+    }
+
+    setPreparingPdfFindingId(finding.id);
+    setPdfAnnotationStatus('Finding an open-access PDF, downloading it, and matching passages to the selected objective...');
+    setStatus({ type: 'info', message: 'Preparing an annotated PDF for this finding...' });
+    try {
+      const response = await preparePaperPdf(selectedProject.id, {
+        persona_id: Number(selectedPersonaId),
+        finding,
+        query: queryText,
+        project_goal: selectedProject.project_goal,
+        project_end_product: selectedProject.end_product,
+        project_target_host: selectedProject.target_host,
+        persona_name: selectedPersona.name,
+        persona_focus: selectedPersona.focus_area,
+        objective_id: selectedObjective?.id,
+        objective_title: selectedObjective?.title,
+        objective_definition: selectedObjective?.definition,
+        objective_signals: selectedObjective?.signals,
+        max_annotations: 8,
+      });
+
+      if (response.status !== 'success') {
+        const message = response.message || 'No downloadable open-access PDF was found for this paper.';
+        setPdfAnnotationStatus(message);
+        setStatus({ type: response.status === 'not_open_access' ? 'info' : 'error', message });
+        return;
+      }
+
+      const insightBlock = response.insights.length
+        ? `PDF annotation notes:\n${response.insights.map((insight) => `- ${insight}`).join('\n')}`
+        : 'PDF annotation notes: the PDF opened, but no high-scoring query/objective passages were detected.';
+      setResearchWorkTemplate((current) => ({
+        ...current,
+        literature_findings: current.literature_findings.map((item) =>
+          item.id === finding.id
+            ? {
+                ...item,
+                labels: item.labels.includes('pdf annotated') ? item.labels : [...item.labels, 'pdf annotated'],
+                relevance: [item.relevance, insightBlock].filter(Boolean).join('\n\n'),
+              }
+            : item
+        ),
+      }));
+
+      if (response.annotated_pdf_url) {
+        setPdfViewer({
+          findingId: finding.id,
+          title: finding.citation || response.paper_id || 'Annotated literature PDF',
+          url: `${API_BASE}${response.annotated_pdf_url}`,
+          annotatedPath: response.annotated_pdf_path,
+          insights: response.insights,
+          questions: literatureElicitationQuestions,
+        });
+      }
+
+      const message = `${response.message} ${response.visual_annotations ? 'Opened in the in-app PDF reader.' : 'PDF reader opened, but visual highlights were unavailable.'}`;
+      setPdfAnnotationStatus(message);
+      setStatus({ type: 'success', message });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to prepare annotated PDF';
+      setPdfAnnotationStatus(message);
+      setStatus({ type: 'error', message });
+    } finally {
+      setPreparingPdfFindingId(null);
     }
   };
 
@@ -822,6 +1302,26 @@ export default function BiotechProjectWorkspace() {
       };
     });
     setStatus({ type: 'success', message: 'Captured your literature judgment in the work template.' });
+  };
+
+  const handleCapturePaperTacitAnswer = (question: string, paperTitle: string) => {
+    const scopedQuestion = `${paperTitle} :: ${question}`;
+    const answer = (literatureElicitationAnswers[scopedQuestion] || '').trim();
+    if (!answer) return;
+    const stableId = `paper_tacit_${scopedQuestion.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 56)}`;
+    const nextJudgment: JudgmentCall = {
+      id: stableId,
+      stance: answer,
+      rationale: `Paper-level response for "${paperTitle}": ${question}`,
+      implication: 'Use this paper-specific judgment when deciding transferability, boundary conditions, and proposal priority.',
+    };
+    setResearchWorkTemplate((current) => ({
+      ...current,
+      judgment_calls: current.judgment_calls.some((item) => item.id === stableId)
+        ? current.judgment_calls.map((item) => (item.id === stableId ? nextJudgment : item))
+        : [...current.judgment_calls, nextJudgment],
+    }));
+    setStatus({ type: 'success', message: 'Captured the paper-specific judgment in the work template.' });
   };
 
   const updateTacitItem = (id: string, patch: Partial<TacitMemoryItem>) => {
@@ -932,11 +1432,38 @@ export default function BiotechProjectWorkspace() {
     setForm((current) => ({ ...current, [field]: value }));
   };
 
+  const handleCopyWorkspaceDigest = async () => {
+    try {
+      await navigator.clipboard.writeText(workspaceDigest);
+      setStatus({ type: 'success', message: 'Copied workspace digest to clipboard.' });
+    } catch {
+      setStatus({ type: 'error', message: 'Could not copy the workspace digest. Select the text manually instead.' });
+    }
+  };
+
+  const handleOpenPdfInSystemViewer = async () => {
+    if (!pdfViewer?.annotatedPath || !window.desktopApp?.openPath) {
+      setStatus({ type: 'info', message: 'System PDF viewer is only available in the desktop app after annotation creates a local file.' });
+      return;
+    }
+    const opened = await window.desktopApp.openPath(pdfViewer.annotatedPath);
+    setStatus({
+      type: opened.ok ? 'success' : 'error',
+      message: opened.ok ? 'Opened annotated PDF in the system viewer.' : opened.error || 'Could not open the system PDF viewer.',
+    });
+  };
+
   return (
     <div className={classNames('relative min-h-screen overflow-hidden p-6 text-slate-950 transition-colors duration-700', modePageTone[modeVisualKey] || modePageTone.general)}>
       <ModeBackdrop modeKey={modeVisualKey} />
       <div className="relative z-10 mx-auto max-w-7xl space-y-6">
-        <WorkspaceHeader selectedProject={Boolean(selectedProject)} onReturnToLanding={handleReturnToLanding} status={status} />
+        <WorkspaceHeader
+          selectedProject={Boolean(selectedProject)}
+          onReturnToLanding={handleReturnToLanding}
+          onOpenMemory={selectedProject ? () => setMemoryDrawerOpen(true) : undefined}
+          memoryItemCount={tacitState.length}
+          status={status}
+        />
 
         {!selectedProject ? (
           <ProjectLandingShell
@@ -955,7 +1482,7 @@ export default function BiotechProjectWorkspace() {
             }}
           />
         ) : (
-          <main className="grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
+          <main className="grid items-start gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
             <WorkflowStateSidebar
               selectedProject={selectedProject}
               focusQuestion={focusQuestion}
@@ -972,19 +1499,72 @@ export default function BiotechProjectWorkspace() {
             <div className="min-w-0 space-y-5">
               <ProjectOverview selectedProject={selectedProject} />
 
-              {selectedPersona && (
-                <WorkspaceMemoryPanel
-                  workspaceKey={workspaceMemoryKey}
-                  memoryStatus={memoryStatus}
-                  tacitState={tacitState}
-                  handoffSummary={handoffSummary}
-                  inferring={inferringMemory}
-                  onInfer={handleInferWorkspaceMemory}
-                  onUpdateTacitItem={updateTacitItem}
-                />
-              )}
+              <section className="rounded-[1.75rem] border border-slate-200 bg-white/90 p-4 shadow-sm backdrop-blur">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">Project Queries</div>
+                    <div className="mt-1 text-lg font-semibold text-slate-950">Investigations under the same project goal</div>
+                    <div className="mt-1 text-sm leading-6 text-slate-600">
+                      The project goal and end product stay fixed. Each query can have its own collaborator, objective mode, literature, and notes.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowNewQueryForm((current) => !current)}
+                    className="rounded-2xl bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+                  >
+                    {showNewQueryForm ? 'Hide query form' : 'New query'}
+                  </button>
+                </div>
+                {(showNewQueryForm || projectQueries.length === 0) && (
+                  <div className="mt-4 rounded-[1.4rem] border border-slate-200 bg-slate-50 p-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Query under this project goal</div>
+                    <div className="mt-1 text-sm leading-6 text-slate-600">
+                      Write the investigation question. Collaborators and objective modes are chosen after this, so the project goal stays stable while the query changes.
+                    </div>
+                    <textarea
+                      value={newQueryText}
+                      onChange={(event) => setNewQueryText(event.target.value)}
+                      rows={4}
+                      className="mt-3 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900"
+                      placeholder="Example: What are the key successful common strategies and examples in microbial flavonoid production? What are the latest improvement options / key challenges?"
+                    />
+                    <div className="mt-3 flex justify-end">
+                      <button
+                        onClick={handleCreateProjectQuery}
+                        disabled={!newQueryText.trim() || creatingQuery}
+                        className="rounded-2xl bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {creatingQuery ? 'Creating...' : 'Create query and continue'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                  {projectQueries.map((query, index) => {
+                    const active = query.id === activeQueryId;
+                    return (
+                      <button
+                        key={query.id}
+                        onClick={() => handleSelectProjectQuery(query.id)}
+                        className={classNames(
+                          'min-w-[220px] rounded-2xl border px-3 py-2 text-left transition',
+                          active ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-slate-50 text-slate-800 hover:bg-white'
+                        )}
+                      >
+                        <div className={classNames('text-[10px] font-semibold uppercase tracking-wide', active ? 'text-slate-300' : 'text-slate-500')}>
+                          Query {index + 1}
+                        </div>
+                        <div className="mt-1 line-clamp-2 text-sm font-semibold">{query.title || 'Untitled query'}</div>
+                        <div className={classNames('mt-1 text-[11px]', active ? 'text-slate-300' : 'text-slate-500')}>
+                          {new Date(query.updated_at).toLocaleString()}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
 
-              {(activeFlowStep === 'collaborator' || activeFlowStep === 'query') && (
+              {activeQueryId !== '' && (activeFlowStep === 'collaborator' || activeFlowStep === 'query') && (
                 <div ref={querySectionRef} className="scroll-mt-28">
                   <QueryAlignmentSection
                     activeStep={activeFlowStep === 'collaborator' ? 'collaborator' : 'query'}
@@ -1004,11 +1584,17 @@ export default function BiotechProjectWorkspace() {
                     }
                     onSubmitQuery={handleClusterObjectives}
                     submittingQuery={loadingObjectiveClusters}
+                    manualCollaborator={manualCollaborator}
+                    showManualCollaboratorForm={showManualCollaboratorForm}
+                    onToggleManualCollaboratorForm={() => setShowManualCollaboratorForm((current) => !current)}
+                    creatingManualCollaborator={creatingManualCollaborator}
+                    onManualCollaboratorChange={handleManualCollaboratorChange}
+                    onCreateManualCollaborator={handleCreateManualCollaborator}
                   />
                 </div>
               )}
 
-              {(activeFlowStep === 'objective' || activeFlowStep === 'workspace') && (
+              {activeQueryId !== '' && (activeFlowStep === 'objective' || activeFlowStep === 'workspace') && (
                 <section
                   ref={objectiveSectionRef}
                   className={classNames(
@@ -1042,6 +1628,11 @@ export default function BiotechProjectWorkspace() {
                       }))
                     }
                     onSetObjectivePickerCollapsed={setObjectivePickerCollapsed}
+                    showManualObjectiveForm={showManualObjectiveForm}
+                    manualObjective={manualObjective}
+                    onToggleManualObjectiveForm={() => setShowManualObjectiveForm((current) => !current)}
+                    onManualObjectiveChange={handleManualObjectiveChange}
+                    onCreateManualObjective={handleCreateManualObjective}
                   />
                   )}
 
@@ -1064,6 +1655,9 @@ export default function BiotechProjectWorkspace() {
                     literatureElicitationAnswers={literatureElicitationAnswers}
                     onLiteratureElicitationAnswerChange={handleLiteratureElicitationAnswerChange}
                     onCaptureLiteratureTacitAnswer={handleCaptureLiteratureTacitAnswer}
+                    onPreparePaperPdf={handlePreparePaperPdf}
+                    preparingPdfFindingId={preparingPdfFindingId}
+                    pdfAnnotationStatus={pdfAnnotationStatus}
                     reasoningNotes={reasoningNotes}
                     onReasoningNotesChange={setReasoningNotes}
                     agenticPlan={agenticPlan}
@@ -1072,11 +1666,6 @@ export default function BiotechProjectWorkspace() {
                     onUpdatePlanStep={updatePlanStep}
                     onGeneratePlan={handleGeneratePlan}
                     loadingPlan={loadingPlan}
-                    executionRun={executionRun}
-                    executionEvents={executionEvents}
-                    onStartExecution={handleStartExecution}
-                    onRefreshExecution={handleRefreshExecution}
-                    startingExecution={startingExecution}
                   />
                 </div>
                   )}
@@ -1086,6 +1675,165 @@ export default function BiotechProjectWorkspace() {
           </main>
         )}
       </div>
+
+      {pdfViewer && (
+        <div className="fixed inset-0 z-50 bg-slate-950/65 p-4 backdrop-blur-sm">
+          <div className="mx-auto flex h-full max-w-6xl flex-col overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white shadow-2xl">
+            <div className="flex flex-col gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Annotated PDF Reader</div>
+                <div className="mt-1 line-clamp-2 text-sm font-semibold text-slate-950">{pdfViewer.title}</div>
+                <div className="mt-1 text-xs text-slate-600">
+                  Highlights are generated from the current query and selected objective mode. Use the notes beside the PDF to decide what transfers into the work template.
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={handleOpenPdfInSystemViewer}
+                  className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900 hover:bg-slate-50"
+                >
+                  Open system viewer
+                </button>
+                <a
+                  href={pdfViewer.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900 hover:bg-slate-50"
+                >
+                  New tab
+                </a>
+                <button
+                  onClick={() => setPdfViewer(null)}
+                  className="rounded-2xl bg-slate-950 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[minmax(0,1fr)_340px]">
+              <iframe title="Annotated PDF" src={pdfViewer.url} className="h-full min-h-[70vh] w-full bg-slate-100" />
+              <aside className="overflow-y-auto border-t border-slate-200 bg-white p-4 lg:border-l lg:border-t-0">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Extracted Notes</div>
+                {pdfViewer.insights.length === 0 ? (
+                  <div className="mt-3 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-3 text-sm leading-6 text-slate-600">
+                    No high-scoring passages were detected. The PDF is still available for manual review.
+                  </div>
+                ) : (
+                  <div className="mt-3 space-y-2">
+                    {pdfViewer.insights.map((insight, index) => (
+                      <div key={`${insight}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-700">
+                        {insight}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {pdfViewer.questions.length > 0 && (
+                  <div className="mt-5 border-t border-slate-200 pt-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Paper-Level Judgment</div>
+                    <div className="mt-1 text-xs leading-5 text-slate-600">
+                      Answer these after reviewing this specific paper. The response is stored as a judgment tied to this source.
+                    </div>
+                    <div className="mt-3 space-y-3">
+                      {pdfViewer.questions.map((question) => {
+                        const scopedQuestion = `${pdfViewer.title} :: ${question}`;
+                        const answer = literatureElicitationAnswers[scopedQuestion] || '';
+                        return (
+                          <div key={question} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                            <div className="text-sm leading-6 text-slate-800">{question}</div>
+                            <textarea
+                              value={answer}
+                              onChange={(event) =>
+                                setLiteratureElicitationAnswers((current) => ({
+                                  ...current,
+                                  [scopedQuestion]: event.target.value,
+                                }))
+                              }
+                              rows={3}
+                              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                              placeholder="Transferability, feasibility, boundary condition, or priority judgment for this paper..."
+                            />
+                            <button
+                              onClick={() => handleCapturePaperTacitAnswer(question, pdfViewer.title)}
+                              disabled={!answer.trim()}
+                              className="mt-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-900 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              Add as paper judgment
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </aside>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {memoryDrawerOpen && selectedProject && (
+        <div className="fixed inset-0 z-40 bg-slate-950/45 backdrop-blur-sm">
+          <button className="absolute inset-0 cursor-default" aria-label="Close workspace memory" onClick={() => setMemoryDrawerOpen(false)} />
+          <aside className="absolute right-0 top-0 h-full w-full max-w-3xl overflow-y-auto border-l border-amber-200 bg-white p-5 shadow-2xl">
+            <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-amber-800">Project Context</div>
+                <div className="mt-1 text-2xl font-semibold tracking-tight text-slate-950">Memory, summary, and export</div>
+                <div className="mt-1 text-sm leading-6 text-slate-600">
+                  This drawer is the durable state layer: objective mode, collaborator, fetched literature notes, tacit user inputs, and handoff context.
+                </div>
+              </div>
+              <button
+                onClick={() => setMemoryDrawerOpen(false)}
+                className="rounded-2xl bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mb-4 rounded-[1.4rem] border border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Workspace Digest</div>
+                  <div className="mt-1 text-sm leading-6 text-slate-700">
+                    Copy this as a handoff/export seed. It combines explicit selections, literature notes, and user-entered judgments.
+                  </div>
+                </div>
+                <button
+                  onClick={handleCopyWorkspaceDigest}
+                  className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900 hover:bg-slate-50"
+                >
+                  Copy digest
+                </button>
+              </div>
+              <textarea
+                readOnly
+                value={workspaceDigest}
+                rows={10}
+                className="mt-3 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs leading-5 text-slate-800"
+              />
+            </div>
+
+            {selectedPersona ? (
+              <WorkspaceMemoryPanel
+                workspaceKey={workspaceMemoryKey}
+                memoryStatus={memoryStatus}
+                tacitState={tacitState}
+                handoffSummary={handoffSummary}
+                inferring={inferringMemory}
+                onInfer={handleInferWorkspaceMemory}
+                onUpdateTacitItem={updateTacitItem}
+              />
+            ) : (
+              <div className="rounded-2xl border border-dashed border-amber-300 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
+                Select a collaborator before inferring tacit memory. The digest above can still be used as an explicit project summary.
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
     </div>
   );
 }

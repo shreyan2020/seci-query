@@ -6,10 +6,12 @@ import { classNames } from '@/features/biotech-workspace/lib/utils';
 interface WorkspaceHeaderProps {
   selectedProject: boolean;
   onReturnToLanding: () => void;
+  onOpenMemory?: () => void;
+  memoryItemCount?: number;
   status: StatusState | null;
 }
 
-export function WorkspaceHeader({ selectedProject, onReturnToLanding, status }: WorkspaceHeaderProps) {
+export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemory, memoryItemCount = 0, status }: WorkspaceHeaderProps) {
   return (
     <section className="rounded-[2rem] border border-emerald-200/70 bg-white/90 p-6 shadow-[0_30px_90px_-40px_rgba(15,23,42,0.45)] backdrop-blur">
       <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
@@ -27,12 +29,22 @@ export function WorkspaceHeader({ selectedProject, onReturnToLanding, status }: 
 
         <div className="flex flex-wrap gap-2">
           {selectedProject && (
-            <button
-              onClick={onReturnToLanding}
-              className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-900 hover:bg-emerald-100"
-            >
-              All Projects
-            </button>
+            <>
+              {onOpenMemory && (
+                <button
+                  onClick={onOpenMemory}
+                  className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-950 hover:bg-amber-100"
+                >
+                  Workspace Memory{memoryItemCount > 0 ? ` (${memoryItemCount})` : ''}
+                </button>
+              )}
+              <button
+                onClick={onReturnToLanding}
+                className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-900 hover:bg-emerald-100"
+              >
+                All Projects
+              </button>
+            </>
           )}
           <Link
             href="/personas"

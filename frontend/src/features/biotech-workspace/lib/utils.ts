@@ -15,13 +15,10 @@ export function humanize(value: string) {
 }
 
 export function defaultFocusQuestion(project: Project, persona?: ProjectPersona | null) {
-  if (project.project_goal?.trim()) {
-    return project.project_goal.trim();
-  }
   if (persona) {
-    return `What is the most decision-useful next move for ${persona.name} in ${project.end_product}?`;
+    return '';
   }
-  return `What is the most decision-useful path to reach viable ${project.end_product.toLowerCase()} production in ${project.target_host}?`;
+  return '';
 }
 
 export function inferObjectiveFrame(objectiveText: string): ObjectiveFrame {

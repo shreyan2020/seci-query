@@ -1,11 +1,16 @@
 import type {
   CreateProjectResponse,
+  CreateProjectCollaboratorResponse,
   FetchProjectLiteratureResponse,
   GeneratePlanResponse,
   InferWorkspaceMemoryResponse,
   ObjectiveClustersResponse,
+  PreparePaperPdfResponse,
   ProjectExecutionRunResponse,
   ProjectFormState,
+  ProjectQuerySession,
+  ProjectQuerySessionListResponse,
+  ResearchFinding,
   ResearchWorkTemplate,
   ProjectsResponse,
   TacitMemoryItem,
@@ -13,7 +18,7 @@ import type {
   WorkspaceMemoryResponse,
 } from '@/features/biotech-workspace/types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export async function fetchProjects(): Promise<ProjectsResponse> {
   const response = await fetch(`${API_BASE}/api/projects`, { cache: 'no-store' });
@@ -121,6 +126,100 @@ export async function fetchProjectLiterature(
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
     throw new Error(err.detail || 'Failed to fetch literature');
+  }
+  return response.json();
+}
+
+export async function createProjectCollaborator(
+  projectId: number,
+  payload: {
+    name: string;
+    role?: string;
+    workflow_stage?: string;
+    focus_area?: string;
+    goals?: string[];
+    workflow_focus?: string[];
+    starter_questions?: string[];
+    summary?: string;
+  }
+): Promise<CreateProjectCollaboratorResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/collaborators`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create project collaborator');
+  }
+  return response.json();
+}
+
+export async function fetchProjectQueries(projectId: number): Promise<ProjectQuerySessionListResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/queries`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to load project queries');
+  return response.json();
+}
+
+export async function createProjectQuery(
+  projectId: number,
+  payload: { title?: string; query: string; state?: Record<string, unknown> }
+): Promise<ProjectQuerySession> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/queries`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create project query');
+  }
+  return response.json();
+}
+
+export async function updateProjectQuery(
+  projectId: number,
+  queryId: number,
+  payload: { title?: string; query?: string; state?: Record<string, unknown> }
+): Promise<ProjectQuerySession> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/queries/${queryId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to save project query');
+  }
+  return response.json();
+}
+
+export async function preparePaperPdf(
+  projectId: number,
+  payload: {
+    persona_id: number;
+    finding: ResearchFinding;
+    query: string;
+    project_goal?: string;
+    project_end_product?: string;
+    project_target_host?: string;
+    persona_name?: string;
+    persona_focus?: string;
+    objective_id?: string;
+    objective_title?: string;
+    objective_definition?: string;
+    objective_signals?: string[];
+    max_annotations?: number;
+  }
+): Promise<PreparePaperPdfResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/literature/pdf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to prepare annotated PDF');
   }
   return response.json();
 }

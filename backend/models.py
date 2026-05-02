@@ -582,6 +582,48 @@ class CreateProjectResponse(BaseModel):
     created_persona_ids: List[int] = Field(default_factory=list)
 
 
+class CreateProjectCollaboratorRequest(BaseModel):
+    name: str
+    role: Optional[str] = "workflow_partner"
+    workflow_stage: Optional[str] = "general"
+    focus_area: Optional[str] = None
+    goals: List[str] = Field(default_factory=list)
+    workflow_focus: List[str] = Field(default_factory=list)
+    starter_questions: List[str] = Field(default_factory=list)
+    summary: Optional[str] = None
+
+
+class CreateProjectCollaboratorResponse(BaseModel):
+    project: ProjectResponse
+    persona: ProjectWorkflowPersona
+
+
+class ProjectQuerySession(BaseModel):
+    id: int
+    project_id: int
+    title: str
+    query: str
+    state: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+    updated_at: str
+
+
+class ProjectQuerySessionListResponse(BaseModel):
+    queries: List[ProjectQuerySession] = Field(default_factory=list)
+
+
+class CreateProjectQuerySessionRequest(BaseModel):
+    title: Optional[str] = None
+    query: str
+    state: Dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateProjectQuerySessionRequest(BaseModel):
+    title: Optional[str] = None
+    query: Optional[str] = None
+    state: Optional[Dict[str, Any]] = None
+
+
 class ResearchFinding(BaseModel):
     id: str
     citation: str = ""
@@ -589,6 +631,7 @@ class ResearchFinding(BaseModel):
     knowns: List[str] = Field(default_factory=list)
     unknowns: List[str] = Field(default_factory=list)
     relevance: str = ""
+    source_ids: Dict[str, str] = Field(default_factory=dict)
 
 
 class ResearchGap(BaseModel):
@@ -665,6 +708,45 @@ class FetchProjectLiteratureResponse(BaseModel):
     objective_lens: Optional[str] = None
     processing_summary: str = ""
     elicitation_questions: List[str] = Field(default_factory=list)
+
+
+class PaperAnnotation(BaseModel):
+    page: int
+    snippet: str
+    reason: str
+    matched_terms: List[str] = Field(default_factory=list)
+    score: float = 0.0
+
+
+class PreparePaperPdfRequest(BaseModel):
+    persona_id: int
+    finding: ResearchFinding
+    query: str
+    project_goal: Optional[str] = None
+    project_end_product: Optional[str] = None
+    project_target_host: Optional[str] = None
+    persona_name: Optional[str] = None
+    persona_focus: Optional[str] = None
+    objective_id: Optional[str] = None
+    objective_title: Optional[str] = None
+    objective_definition: Optional[str] = None
+    objective_signals: List[str] = Field(default_factory=list)
+    max_annotations: int = 8
+
+
+class PreparePaperPdfResponse(BaseModel):
+    status: Literal["success", "not_open_access", "error"]
+    message: str
+    paper_id: Optional[str] = None
+    pmid: Optional[str] = None
+    pmcid: Optional[str] = None
+    source_pdf_url: Optional[str] = None
+    original_pdf_path: Optional[str] = None
+    annotated_pdf_path: Optional[str] = None
+    annotated_pdf_url: Optional[str] = None
+    annotations: List[PaperAnnotation] = Field(default_factory=list)
+    insights: List[str] = Field(default_factory=list)
+    visual_annotations: bool = False
 
 
 class GenerateProjectPlanRequest(BaseModel):

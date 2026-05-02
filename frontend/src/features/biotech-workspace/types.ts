@@ -82,6 +82,25 @@ export interface CreateProjectResponse {
   created_persona_ids: number[];
 }
 
+export interface CreateProjectCollaboratorResponse {
+  project: Project;
+  persona: ProjectPersona;
+}
+
+export interface ProjectQuerySession {
+  id: number;
+  project_id: number;
+  title: string;
+  query: string;
+  state: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectQuerySessionListResponse {
+  queries: ProjectQuerySession[];
+}
+
 export interface ResearchFinding {
   id: string;
   citation: string;
@@ -89,6 +108,7 @@ export interface ResearchFinding {
   knowns: string[];
   unknowns: string[];
   relevance: string;
+  source_ids?: Record<string, string>;
 }
 
 export interface ResearchGap {
@@ -146,6 +166,29 @@ export interface FetchProjectLiteratureResponse {
   objective_lens?: string | null;
   processing_summary: string;
   elicitation_questions: string[];
+}
+
+export interface PaperAnnotation {
+  page: number;
+  snippet: string;
+  reason: string;
+  matched_terms: string[];
+  score: number;
+}
+
+export interface PreparePaperPdfResponse {
+  status: 'success' | 'not_open_access' | 'error';
+  message: string;
+  paper_id?: string | null;
+  pmid?: string | null;
+  pmcid?: string | null;
+  source_pdf_url?: string | null;
+  original_pdf_path?: string | null;
+  annotated_pdf_path?: string | null;
+  annotated_pdf_url?: string | null;
+  annotations: PaperAnnotation[];
+  insights: string[];
+  visual_annotations: boolean;
 }
 
 export interface TacitMemoryItem {

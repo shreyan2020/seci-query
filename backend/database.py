@@ -176,6 +176,19 @@ class DatabaseManager:
         ''')
 
         cursor.execute('''
+            CREATE TABLE IF NOT EXISTS project_query_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                query TEXT NOT NULL DEFAULT '',
+                state_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            )
+        ''')
+
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS project_execution_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER NOT NULL,
@@ -287,6 +300,11 @@ class DatabaseManager:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_project_workspace_project_persona
             ON project_workspace_state(project_id, persona_id)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_project_query_sessions_project_updated
+            ON project_query_sessions(project_id, updated_at DESC)
         ''')
 
         cursor.execute('''
@@ -841,11 +859,85 @@ class DatabaseManager:
             cursor.execute(f'DELETE FROM personas WHERE id IN ({placeholders})', persona_ids)
 
         cursor.execute('DELETE FROM project_workspace_state WHERE project_id = ?', (project_id,))
+        cursor.execute('DELETE FROM project_query_sessions WHERE project_id = ?', (project_id,))
         cursor.execute('DELETE FROM projects WHERE id = ?', (project_id,))
         deleted = cursor.rowcount > 0
         conn.commit()
         conn.close()
         return deleted
+
+    def list_project_query_sessions(self, project_id: int) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM project_query_sessions
+            WHERE project_id = ?
+            ORDER BY updated_at DESC, id DESC
+            ''',
+            (project_id,),
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        for row in rows:
+            row["state"] = json.loads(row.get("state_json") or "{}")
+        return rows
+
+    def get_project_query_session(self, query_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM project_query_sessions WHERE id = ?', (query_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        payload = dict(row)
+        payload["state"] = json.loads(payload.get("state_json") or "{}")
+        return payload
+
+    def create_project_query_session(self, project_id: int, title: str, query: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO project_query_sessions(project_id, title, query, state_json)
+            VALUES (?, ?, ?, ?)
+            ''',
+            (project_id, title, query, json.dumps(state or {})),
+        )
+        query_id = int(cursor.lastrowid)
+        conn.commit()
+        conn.close()
+        created = self.get_project_query_session(query_id)
+        return created or {}
+
+    def update_project_query_session(
+        self,
+        query_id: int,
+        *,
+        title: Optional[str] = None,
+        query: Optional[str] = None,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        existing = self.get_project_query_session(query_id)
+        if not existing:
+            return None
+        next_title = existing.get("title") if title is None else title
+        next_query = existing.get("query") if query is None else query
+        next_state = existing.get("state") if state is None else state
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE project_query_sessions
+            SET title = ?, query = ?, state_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ''',
+            (next_title, next_query, json.dumps(next_state or {}), query_id),
+        )
+        conn.commit()
+        conn.close()
+        return self.get_project_query_session(query_id)
 
     def get_project_workspace_state(self, project_id: int, persona_id: int) -> Optional[Dict[str, Any]]:
         conn = self._connect()
