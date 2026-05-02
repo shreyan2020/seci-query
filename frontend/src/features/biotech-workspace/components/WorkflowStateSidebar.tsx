@@ -61,11 +61,19 @@ export function WorkflowStateSidebar({
   onOpenDraft,
 }: WorkflowStateSidebarProps) {
   return (
-    <aside className="rounded-[1.25rem] border border-slate-200 bg-white/90 shadow-sm backdrop-blur xl:sticky xl:top-6 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto">
-      <div className="p-4">
-        <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Workspace State</div>
+    <aside className="rounded-none border border-slate-200 bg-white/95 shadow-[18px_0_70px_-55px_rgba(15,23,42,0.65)] backdrop-blur xl:sticky xl:top-3 xl:max-h-[calc(100vh-1.5rem)] xl:overflow-y-auto">
+      <div className="border-b border-slate-200 p-4">
+        <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Project Console</div>
         <div className="mt-2 text-lg font-semibold text-slate-950">{selectedProject.name}</div>
         <div className="mt-2 text-xs leading-5 text-slate-500">{workspaceStatusMessage}</div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 border-b border-slate-200 bg-slate-50/80 p-3">
+        {['Projects', 'Queries', 'Papers', 'Drafts'].map((item) => (
+          <div key={item} className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-center text-[11px] font-semibold text-slate-700">
+            {item}
+          </div>
+        ))}
       </div>
 
       <SidebarRow

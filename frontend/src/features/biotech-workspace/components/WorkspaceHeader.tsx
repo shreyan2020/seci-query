@@ -13,7 +13,7 @@ interface WorkspaceHeaderProps {
 
 export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemory, memoryItemCount = 0, status }: WorkspaceHeaderProps) {
   return (
-    <section className="rounded-[2rem] border border-emerald-200/70 bg-white/90 p-6 shadow-[0_30px_90px_-40px_rgba(15,23,42,0.45)] backdrop-blur">
+    <section className="rounded-none border border-emerald-200/70 bg-white/90 p-6 shadow-[0_24px_70px_-45px_rgba(15,23,42,0.45)] backdrop-blur">
       <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
         <div className="max-w-3xl">
           <div className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.28em] text-emerald-900">

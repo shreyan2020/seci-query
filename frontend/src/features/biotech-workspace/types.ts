@@ -109,6 +109,9 @@ export interface ResearchFinding {
   unknowns: string[];
   relevance: string;
   source_ids?: Record<string, string>;
+  judgment_calls?: JudgmentCall[];
+  validation_tracks?: ValidationTrack[];
+  synthesis_memo?: string;
 }
 
 export interface ResearchGap {

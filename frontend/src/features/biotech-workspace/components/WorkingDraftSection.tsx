@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { ResearchWorkTemplateSection } from '@/features/biotech-workspace/components/ResearchWorkTemplateSection';
 import type {
   AgenticPlan,
@@ -13,7 +14,6 @@ interface WorkingDraftSectionProps {
   currentModeTitle: string;
   currentModeDescription: string;
   onChooseAnotherObjective: () => void;
-  focusQuestion: string;
   researchWorkTemplate: ResearchWorkTemplate;
   onResearchWorkTemplateChange: (next: ResearchWorkTemplate) => void;
   onFetchLiterature: () => void;
@@ -22,14 +22,9 @@ interface WorkingDraftSectionProps {
   literatureObjectiveLens?: string | null;
   literatureProcessingSummary?: string | null;
   literatureElicitationQuestions?: string[];
-  literatureElicitationAnswers?: Record<string, string>;
-  onLiteratureElicitationAnswerChange?: (question: string, value: string) => void;
-  onCaptureLiteratureTacitAnswer?: (question: string) => void;
   onPreparePaperPdf?: (finding: ResearchFinding) => void;
   preparingPdfFindingId?: string | null;
   pdfAnnotationStatus?: string | null;
-  reasoningNotes: string;
-  onReasoningNotesChange: (value: string) => void;
   agenticPlan: AgenticPlan | null;
   selectedPlanStepId: string;
   onSelectPlanStep: (stepId: string) => void;
@@ -43,7 +38,6 @@ export function WorkingDraftSection({
   currentModeTitle,
   currentModeDescription,
   onChooseAnotherObjective,
-  focusQuestion,
   researchWorkTemplate,
   onResearchWorkTemplateChange,
   onFetchLiterature,
@@ -52,14 +46,9 @@ export function WorkingDraftSection({
   literatureObjectiveLens,
   literatureProcessingSummary,
   literatureElicitationQuestions,
-  literatureElicitationAnswers,
-  onLiteratureElicitationAnswerChange,
-  onCaptureLiteratureTacitAnswer,
   onPreparePaperPdf,
   preparingPdfFindingId,
   pdfAnnotationStatus,
-  reasoningNotes,
-  onReasoningNotesChange,
   agenticPlan,
   selectedPlanStepId,
   onSelectPlanStep,
@@ -67,6 +56,7 @@ export function WorkingDraftSection({
   onGeneratePlan,
   loadingPlan,
 }: WorkingDraftSectionProps) {
+  const [literatureReviewComplete, setLiteratureReviewComplete] = useState(false);
   const selectedPlanStep = agenticPlan?.steps.find((step) => step.id === selectedPlanStepId) || null;
   const modeKey = getModeVisualKey(currentModeTitle);
   const modeShellTone: Record<string, string> = {
@@ -128,13 +118,6 @@ export function WorkingDraftSection({
               >
                 Choose another objective
               </button>
-              <button
-                onClick={onGeneratePlan}
-                disabled={loadingPlan}
-                className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {loadingPlan ? 'Drafting...' : 'Generate Mode Draft'}
-              </button>
             </div>
           )}
         </div>
@@ -148,7 +131,6 @@ export function WorkingDraftSection({
       ) : (
         <>
           <ResearchWorkTemplateSection
-            focusQuestion={focusQuestion}
             workTemplate={researchWorkTemplate}
             onWorkTemplateChange={onResearchWorkTemplateChange}
             onFetchLiterature={onFetchLiterature}
@@ -157,39 +139,16 @@ export function WorkingDraftSection({
             literatureObjectiveLens={literatureObjectiveLens}
             literatureProcessingSummary={literatureProcessingSummary}
             literatureElicitationQuestions={literatureElicitationQuestions}
-            literatureElicitationAnswers={literatureElicitationAnswers}
-            onLiteratureElicitationAnswerChange={onLiteratureElicitationAnswerChange}
-            onCaptureLiteratureTacitAnswer={onCaptureLiteratureTacitAnswer}
             onPreparePaperPdf={onPreparePaperPdf}
             preparingPdfFindingId={preparingPdfFindingId}
             pdfAnnotationStatus={pdfAnnotationStatus}
+            reviewComplete={literatureReviewComplete}
+            onCompleteReview={() => setLiteratureReviewComplete(true)}
+            onGeneratePlan={onGeneratePlan}
+            loadingPlan={loadingPlan}
           />
 
-          <div className="relative mt-5 rounded-[1.5rem] border border-slate-200 bg-white/85 p-4">
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Reasoning And Synthesis</div>
-            <div className="mt-1 text-sm text-slate-600">
-              {agenticPlan
-                ? 'Keep a running synthesis between generations, then edit the draft plan directly underneath.'
-                : 'Use this as the freeform layer for anything that does not fit the structured template: comparison notes, caveats, or synthesis across sources.'}
-            </div>
-            <textarea
-              value={reasoningNotes}
-              onChange={(e) => onReasoningNotesChange(e.target.value)}
-              rows={agenticPlan ? 6 : 7}
-              className="mt-3 w-full rounded-[1.25rem] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900"
-              placeholder={
-                agenticPlan
-                  ? 'Capture the latest interpretation, open questions, or next hypotheses before the next generation.'
-                  : 'Example: reported flavonoid work often improves precursor flux and cofactor balance, but product toxicity and pathway burden still look unresolved. Use this box for caveats, cross-links, or synthesis beyond the structured work template.'
-              }
-            />
-          </div>
-
-          {!agenticPlan ? (
-            <div className="relative mt-5 rounded-[1.5rem] border border-dashed border-slate-300 bg-white/75 p-8 text-center text-sm text-slate-600">
-              Generate a draft to inspect the proposed reasoning steps, evidence hooks, risks, and editable rationale.
-            </div>
-          ) : (
+          {literatureReviewComplete && agenticPlan && (
             <div className="relative mt-5 space-y-5">
               <div className="rounded-[1.5rem] border border-slate-200 bg-white/90 p-4">
                 <div className="text-lg font-semibold text-slate-950">{agenticPlan.plan_title}</div>

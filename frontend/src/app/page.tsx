@@ -215,6 +215,9 @@ export default function BiotechProjectWorkspace() {
       ? selectedProject.personas.find((persona) => persona.persona_id === Number(selectedPersonaId)) || null
       : null;
   const selectedObjective = objectiveClusters.find((objective) => objective.id === selectedObjectiveId) || null;
+  const pdfViewerFinding = pdfViewer
+    ? researchWorkTemplate.literature_findings.find((finding) => finding.id === pdfViewer.findingId) || null
+    : null;
   const workingQuestionText = focusQuestion.trim() || selectedProject?.project_goal || '';
   const selectedObjectiveLens = selectedObjective
     ? [selectedObjective.title, selectedObjective.definition, ...selectedObjective.signals].join(' ')
@@ -1317,11 +1320,32 @@ export default function BiotechProjectWorkspace() {
     };
     setResearchWorkTemplate((current) => ({
       ...current,
-      judgment_calls: current.judgment_calls.some((item) => item.id === stableId)
-        ? current.judgment_calls.map((item) => (item.id === stableId ? nextJudgment : item))
-        : [...current.judgment_calls, nextJudgment],
+      literature_findings: current.literature_findings.map((finding) => {
+        if (pdfViewer?.findingId && finding.id !== pdfViewer.findingId) {
+          return finding;
+        }
+        const judgments = finding.judgment_calls || [];
+        return {
+          ...finding,
+          judgment_calls: judgments.some((item) => item.id === stableId)
+            ? judgments.map((item) => (item.id === stableId ? nextJudgment : item))
+            : [...judgments, nextJudgment],
+        };
+      }),
     }));
     setStatus({ type: 'success', message: 'Captured the paper-specific judgment in the work template.' });
+  };
+
+  const updatePdfViewerFinding = (patch: Partial<ResearchFinding>) => {
+    if (!pdfViewer) {
+      return;
+    }
+    setResearchWorkTemplate((current) => ({
+      ...current,
+      literature_findings: current.literature_findings.map((finding) =>
+        finding.id === pdfViewer.findingId ? { ...finding, ...patch } : finding
+      ),
+    }));
   };
 
   const updateTacitItem = (id: string, patch: Partial<TacitMemoryItem>) => {
@@ -1454,9 +1478,9 @@ export default function BiotechProjectWorkspace() {
   };
 
   return (
-    <div className={classNames('relative min-h-screen overflow-hidden p-6 text-slate-950 transition-colors duration-700', modePageTone[modeVisualKey] || modePageTone.general)}>
+    <div className={classNames('relative min-h-screen overflow-hidden p-0 text-slate-950 transition-colors duration-700', modePageTone[modeVisualKey] || modePageTone.general)}>
       <ModeBackdrop modeKey={modeVisualKey} />
-      <div className="relative z-10 mx-auto max-w-7xl space-y-6">
+      <div className="relative z-10 flex min-h-screen w-full flex-col gap-3 p-3">
         <WorkspaceHeader
           selectedProject={Boolean(selectedProject)}
           onReturnToLanding={handleReturnToLanding}
@@ -1482,7 +1506,7 @@ export default function BiotechProjectWorkspace() {
             }}
           />
         ) : (
-          <main className="grid items-start gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
+          <main className="grid min-h-0 flex-1 items-start gap-3 xl:grid-cols-[320px_minmax(0,1fr)]">
             <WorkflowStateSidebar
               selectedProject={selectedProject}
               focusQuestion={focusQuestion}
@@ -1643,7 +1667,6 @@ export default function BiotechProjectWorkspace() {
                     currentModeTitle={currentModeTitle}
                     currentModeDescription={currentModeDescription}
                     onChooseAnotherObjective={handleChooseAnotherObjective}
-                    focusQuestion={focusQuestion}
                     researchWorkTemplate={researchWorkTemplate}
                     onResearchWorkTemplateChange={setResearchWorkTemplate}
                     onFetchLiterature={handleFetchLiterature}
@@ -1652,14 +1675,9 @@ export default function BiotechProjectWorkspace() {
                     literatureObjectiveLens={literatureObjectiveLens}
                     literatureProcessingSummary={literatureProcessingSummary}
                     literatureElicitationQuestions={literatureElicitationQuestions}
-                    literatureElicitationAnswers={literatureElicitationAnswers}
-                    onLiteratureElicitationAnswerChange={handleLiteratureElicitationAnswerChange}
-                    onCaptureLiteratureTacitAnswer={handleCaptureLiteratureTacitAnswer}
                     onPreparePaperPdf={handlePreparePaperPdf}
                     preparingPdfFindingId={preparingPdfFindingId}
                     pdfAnnotationStatus={pdfAnnotationStatus}
-                    reasoningNotes={reasoningNotes}
-                    onReasoningNotesChange={setReasoningNotes}
                     agenticPlan={agenticPlan}
                     selectedPlanStepId={selectedPlanStepId}
                     onSelectPlanStep={setSelectedPlanStepId}
@@ -1677,14 +1695,14 @@ export default function BiotechProjectWorkspace() {
       </div>
 
       {pdfViewer && (
-        <div className="fixed inset-0 z-50 bg-slate-950/65 p-4 backdrop-blur-sm">
-          <div className="mx-auto flex h-full max-w-6xl flex-col overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white shadow-2xl">
-            <div className="flex flex-col gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="fixed inset-0 z-50 bg-slate-950">
+          <div className="flex h-full w-full flex-col overflow-hidden bg-white">
+            <div className="flex flex-col gap-3 border-b border-slate-200 bg-slate-50 px-5 py-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Annotated PDF Reader</div>
                 <div className="mt-1 line-clamp-2 text-sm font-semibold text-slate-950">{pdfViewer.title}</div>
                 <div className="mt-1 text-xs text-slate-600">
-                  Highlights are generated from the current query and selected objective mode. Use the notes beside the PDF to decide what transfers into the work template.
+                  Read the paper in context and use the right-side notebook to edit extracted fields, judgment calls, and transfer notes for this source.
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -1711,9 +1729,9 @@ export default function BiotechProjectWorkspace() {
               </div>
             </div>
 
-            <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[minmax(0,1fr)_340px]">
-              <iframe title="Annotated PDF" src={pdfViewer.url} className="h-full min-h-[70vh] w-full bg-slate-100" />
-              <aside className="overflow-y-auto border-t border-slate-200 bg-white p-4 lg:border-l lg:border-t-0">
+            <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[minmax(0,1fr)_460px]">
+              <iframe title="Annotated PDF" src={pdfViewer.url} className="h-full min-h-0 w-full bg-slate-950" />
+              <aside className="overflow-y-auto border-t border-slate-200 bg-white p-5 lg:border-l lg:border-t-0">
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Extracted Notes</div>
                 {pdfViewer.insights.length === 0 ? (
                   <div className="mt-3 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-3 text-sm leading-6 text-slate-600">
@@ -1726,6 +1744,83 @@ export default function BiotechProjectWorkspace() {
                         {insight}
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {pdfViewerFinding && (
+                  <div className="mt-5 border-t border-slate-200 pt-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Extracted Fields</div>
+                    <div className="mt-1 text-xs leading-5 text-slate-600">
+                      These fields write back to the active literature finding, so the paper review and work template stay synced.
+                    </div>
+
+                    <label className="mt-3 block">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Citation</div>
+                      <textarea
+                        value={pdfViewerFinding.citation}
+                        onChange={(event) => updatePdfViewerFinding({ citation: event.target.value })}
+                        rows={3}
+                        className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                      />
+                    </label>
+
+                    <label className="mt-3 block">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Knowns</div>
+                      <textarea
+                        value={pdfViewerFinding.knowns.join('\n')}
+                        onChange={(event) =>
+                          updatePdfViewerFinding({
+                            knowns: event.target.value
+                              .split('\n')
+                              .map((item) => item.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                        rows={5}
+                        className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                        placeholder="One known per line"
+                      />
+                    </label>
+
+                    <label className="mt-3 block">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Unknowns / Transfer Questions</div>
+                      <textarea
+                        value={pdfViewerFinding.unknowns.join('\n')}
+                        onChange={(event) =>
+                          updatePdfViewerFinding({
+                            unknowns: event.target.value
+                              .split('\n')
+                              .map((item) => item.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                        rows={5}
+                        className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                        placeholder="One gap or transfer question per line"
+                      />
+                    </label>
+
+                    <label className="mt-3 block">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Relevance</div>
+                      <textarea
+                        value={pdfViewerFinding.relevance}
+                        onChange={(event) => updatePdfViewerFinding({ relevance: event.target.value })}
+                        rows={4}
+                        className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                        placeholder="What transfers into this project?"
+                      />
+                    </label>
+
+                    <label className="mt-3 block">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Paper Memo</div>
+                      <textarea
+                        value={pdfViewerFinding.synthesis_memo || ''}
+                        onChange={(event) => updatePdfViewerFinding({ synthesis_memo: event.target.value })}
+                        rows={5}
+                        className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                        placeholder="Your reading notes, caveats, and next actions for this paper..."
+                      />
+                    </label>
                   </div>
                 )}
 
