@@ -42,6 +42,7 @@ from models import (
     CreateProjectCollaboratorRequest, CreateProjectCollaboratorResponse,
     ProjectQuerySession, ProjectQuerySessionListResponse,
     CreateProjectQuerySessionRequest, UpdateProjectQuerySessionRequest,
+    ProjectJourneyEvent, ProjectJourneyPath, ProjectJourneyResponse, ProjectJourneySummary,
     ProjectResponse, ProjectListResponse, ProjectWorkflowPersona,
     GenerateProjectPlanRequest, ResearchWorkTemplate,
     ProjectWorkspaceState, ProjectWorkspaceRequest, ProjectWorkspaceResponse,
@@ -1852,6 +1853,137 @@ async def update_project_query_session(project_id: int, query_id: int, request: 
     return _project_query_row_to_response(row)
 
 
+def _project_journey_event(row: dict) -> ProjectJourneyEvent:
+    payload = row.get("payload") or {}
+    event_type = str(row.get("event_type") or "event")
+    title_map = {
+        "project_created": "Project created",
+        "project_query_created": "Query created",
+        "project_query_selected": "Query reopened",
+        "project_collaborator_created": "Collaborator created",
+        "project_collaborator_selected": "Collaborator selected",
+        "project_objective_selected": "Objective selected",
+        "objectives_generated": "Objective clusters generated",
+        "project_literature_fetched": "Literature fetched",
+        "paper_pdf_annotated": "Paper reviewed",
+        "project_workspace_saved": "Workspace saved",
+        "project_plan_generated": "Draft generated",
+        "project_execution_started": "Agentic execution started",
+    }
+    title = title_map.get(event_type, event_type.replace("_", " ").title())
+    detail = ""
+    if payload.get("query"):
+        detail = str(payload.get("query"))
+    elif payload.get("objective_title"):
+        detail = str(payload.get("objective_title"))
+    elif payload.get("persona_name") or payload.get("name"):
+        detail = str(payload.get("persona_name") or payload.get("name"))
+    elif payload.get("tool_query"):
+        detail = str(payload.get("tool_query"))
+    elif payload.get("mode_label"):
+        detail = str(payload.get("mode_label"))
+    query_id = payload.get("query_id")
+    persona_id = payload.get("persona_id")
+    return ProjectJourneyEvent(
+        id=int(row.get("id") or 0),
+        event_type=event_type,
+        title=title,
+        detail=detail[:260],
+        timestamp=str(row.get("timestamp") or row.get("created_at") or ""),
+        query_id=int(query_id) if isinstance(query_id, int) or str(query_id or "").isdigit() else None,
+        persona_id=int(persona_id) if isinstance(persona_id, int) or str(persona_id or "").isdigit() else None,
+        objective_id=str(payload.get("objective_id")) if payload.get("objective_id") else None,
+        payload=payload,
+    )
+
+
+def _project_journey_summary_for_query(query: dict, personas_by_id: Dict[int, dict], events: List[ProjectJourneyEvent]) -> ProjectJourneyPath:
+    state = query.get("state") or {}
+    work_template = state.get("research_work_template") if isinstance(state.get("research_work_template"), dict) else {}
+    selected_persona_id = state.get("selected_persona_id") if isinstance(state.get("selected_persona_id"), int) else None
+    persona = personas_by_id.get(int(selected_persona_id)) if selected_persona_id else None
+    objective_clusters = state.get("objective_clusters") if isinstance(state.get("objective_clusters"), list) else []
+    selected_objective_id = str(state.get("selected_objective_id") or "")
+    selected_objective = next(
+        (item for item in objective_clusters if isinstance(item, dict) and str(item.get("id") or "") == selected_objective_id),
+        None,
+    )
+    literature = work_template.get("literature_findings") if isinstance(work_template.get("literature_findings"), list) else []
+    judgments = work_template.get("judgment_calls") if isinstance(work_template.get("judgment_calls"), list) else []
+    gaps = work_template.get("common_gaps") if isinstance(work_template.get("common_gaps"), list) else []
+    proposals = work_template.get("proposal_candidates") if isinstance(work_template.get("proposal_candidates"), list) else []
+    plan = state.get("agentic_plan") if isinstance(state.get("agentic_plan"), dict) else {}
+    plan_steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+    query_events = [
+        event
+        for event in events
+        if event.query_id == int(query["id"])
+        or (event.query_id is None and selected_persona_id and event.persona_id == selected_persona_id)
+    ][-6:]
+    parts = []
+    if selected_persona_id:
+        parts.append(f"worked with {persona.get('name') if persona else f'persona {selected_persona_id}'}")
+    if selected_objective:
+        parts.append(f"used the {selected_objective.get('title')} objective")
+    if literature:
+        parts.append(f"collected {len(literature)} literature finding{'s' if len(literature) != 1 else ''}")
+    if judgments:
+        parts.append(f"captured {len(judgments)} judgment call{'s' if len(judgments) != 1 else ''}")
+    summary = "This path " + ", ".join(parts) + "." if parts else "This query is ready for collaborator and objective exploration."
+    if not selected_persona_id:
+        next_action = "Choose or create a collaborator."
+    elif not selected_objective:
+        next_action = "Select or create an objective mode."
+    elif not literature:
+        next_action = "Fetch literature or add evidence manually."
+    elif not proposals and not plan_steps:
+        next_action = "Synthesize gaps, judgments, or draft proposal candidates."
+    else:
+        next_action = "Reopen the path to refine or extend the experiment plan."
+    return ProjectJourneyPath(
+        id=f"query-{query['id']}",
+        query_id=int(query["id"]),
+        query_title=str(query.get("title") or f"Query {query['id']}"),
+        query=str(query.get("query") or ""),
+        selected_persona_id=selected_persona_id,
+        selected_persona_name=str(persona.get("name")) if persona else None,
+        selected_objective_id=selected_objective_id or None,
+        selected_objective_title=str(selected_objective.get("title")) if selected_objective else None,
+        active_flow_step=str(state.get("active_flow_step") or "") or None,
+        updated_at=str(query.get("updated_at") or ""),
+        literature_count=len(literature),
+        judgment_count=len(judgments),
+        gap_count=len(gaps),
+        proposal_count=len(proposals),
+        plan_step_count=len(plan_steps),
+        summary=summary,
+        next_action_hint=next_action,
+        recent_events=query_events,
+    )
+
+
+@app.get("/api/projects/{project_id}/journey", response_model=ProjectJourneyResponse)
+async def get_project_journey(project_id: int):
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_response = _project_row_to_response(project)
+    personas_by_id = {persona.persona_id: persona.model_dump() for persona in project_response.personas}
+    query_rows = db.list_project_query_sessions(project_id)
+    events = [_project_journey_event(row) for row in db.list_project_events(project_id, limit=1200)]
+    paths = [_project_journey_summary_for_query(query, personas_by_id, events) for query in query_rows]
+    summary = ProjectJourneySummary(
+        total_queries=len(paths),
+        explored_collaborators=len({path.selected_persona_id for path in paths if path.selected_persona_id}),
+        explored_objectives=len({path.selected_objective_id for path in paths if path.selected_objective_id}),
+        literature_findings=sum(path.literature_count for path in paths),
+        judgment_calls=sum(path.judgment_count for path in paths),
+        proposal_candidates=sum(path.proposal_count for path in paths),
+        event_count=len(events),
+    )
+    return ProjectJourneyResponse(project=project_response, summary=summary, paths=paths, events=events[-80:])
+
+
 @app.delete("/api/projects/{project_id}")
 async def delete_project(project_id: int):
     project = db.get_project(project_id)
@@ -2079,7 +2211,7 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
 
         original_pdf_path = Path(str(download["original_pdf_path"]))
         annotated_pdf_path = original_pdf_path.with_name("annotated.pdf")
-        annotation_result = annotate_pdf_for_objective(
+        annotation_result = await annotate_pdf_for_objective(
             pdf_path=original_pdf_path,
             query=request.query,
             project_goal=request.project_goal or str(project.get("project_goal") or ""),

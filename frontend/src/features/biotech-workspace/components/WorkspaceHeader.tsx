@@ -7,11 +7,12 @@ interface WorkspaceHeaderProps {
   selectedProject: boolean;
   onReturnToLanding: () => void;
   onOpenMemory?: () => void;
+  journeyHref?: string;
   memoryItemCount?: number;
   status: StatusState | null;
 }
 
-export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemory, memoryItemCount = 0, status }: WorkspaceHeaderProps) {
+export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemory, journeyHref, memoryItemCount = 0, status }: WorkspaceHeaderProps) {
   return (
     <section className="rounded-none border border-emerald-200/70 bg-white/90 p-6 shadow-[0_24px_70px_-45px_rgba(15,23,42,0.45)] backdrop-blur">
       <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
@@ -37,6 +38,14 @@ export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemo
                 >
                   Workspace Memory{memoryItemCount > 0 ? ` (${memoryItemCount})` : ''}
                 </button>
+              )}
+              {journeyHref && (
+                <Link
+                  href={journeyHref}
+                  className="rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-950 hover:bg-cyan-100"
+                >
+                  User Journey
+                </Link>
               )}
               <button
                 onClick={onReturnToLanding}

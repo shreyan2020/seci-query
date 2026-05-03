@@ -624,6 +624,56 @@ class UpdateProjectQuerySessionRequest(BaseModel):
     state: Optional[Dict[str, Any]] = None
 
 
+class ProjectJourneyEvent(BaseModel):
+    id: int
+    event_type: str
+    title: str
+    detail: str = ""
+    timestamp: str
+    query_id: Optional[int] = None
+    persona_id: Optional[int] = None
+    objective_id: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectJourneyPath(BaseModel):
+    id: str
+    query_id: int
+    query_title: str
+    query: str
+    selected_persona_id: Optional[int] = None
+    selected_persona_name: Optional[str] = None
+    selected_objective_id: Optional[str] = None
+    selected_objective_title: Optional[str] = None
+    active_flow_step: Optional[str] = None
+    updated_at: str
+    literature_count: int = 0
+    judgment_count: int = 0
+    gap_count: int = 0
+    proposal_count: int = 0
+    plan_step_count: int = 0
+    summary: str = ""
+    next_action_hint: str = ""
+    recent_events: List[ProjectJourneyEvent] = Field(default_factory=list)
+
+
+class ProjectJourneySummary(BaseModel):
+    total_queries: int = 0
+    explored_collaborators: int = 0
+    explored_objectives: int = 0
+    literature_findings: int = 0
+    judgment_calls: int = 0
+    proposal_candidates: int = 0
+    event_count: int = 0
+
+
+class ProjectJourneyResponse(BaseModel):
+    project: ProjectResponse
+    summary: ProjectJourneySummary
+    paths: List[ProjectJourneyPath] = Field(default_factory=list)
+    events: List[ProjectJourneyEvent] = Field(default_factory=list)
+
+
 class ResearchFinding(BaseModel):
     id: str
     citation: str = ""

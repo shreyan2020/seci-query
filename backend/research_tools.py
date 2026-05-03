@@ -989,7 +989,227 @@ def _split_page_lines(text: str) -> List[str]:
     return [sentence.strip() for sentence in sentences if len(sentence.strip()) >= 50]
 
 
-def annotate_pdf_for_objective(
+_ANNOTATION_SECTION_TERMS = {
+    "activity",
+    "biosynthesis",
+    "co-culture",
+    "coculture",
+    "enzyme",
+    "engineering",
+    "fermentation",
+    "flavonoid",
+    "glucose",
+    "improved",
+    "increase",
+    "malonyl-coa",
+    "metabolic",
+    "pathway",
+    "precursor",
+    "productivity",
+    "production",
+    "strain",
+    "substrate",
+    "titer",
+    "titre",
+    "yield",
+}
+
+
+def _page_text_blocks(page: Any) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    page_dict = page.get_text("dict") or {}
+    for block_index, block in enumerate(page_dict.get("blocks") or []):
+        if block.get("type") != 0:
+            continue
+        line_items: List[Dict[str, Any]] = []
+        for line in block.get("lines") or []:
+            spans = [str(span.get("text") or "") for span in (line.get("spans") or [])]
+            text = re.sub(r"\s+", " ", "".join(spans)).strip()
+            if text:
+                bbox = line.get("bbox") or block.get("bbox")
+                if bbox:
+                    line_items.append({"text": text, "rect": tuple(float(x) for x in bbox)})
+                else:
+                    line_items.append({"text": text, "rect": None})
+        lines = [item["text"] for item in line_items]
+        joined = re.sub(r"\s+", " ", " ".join(lines)).strip()
+        if len(joined) < 50 or _is_boilerplate_line(joined):
+            continue
+        block_rect = tuple(float(x) for x in (block.get("bbox") or []))
+        rects = [item["rect"] for item in line_items if item.get("rect")]
+        blocks.append(
+            {
+                "block_index": block_index,
+                "text": joined,
+                "lines": line_items,
+                "rects": rects or ([block_rect] if len(block_rect) == 4 else []),
+            }
+        )
+    return blocks
+
+
+def _focused_block_rects(block: Dict[str, Any], matched_terms: List[str]) -> List[tuple[float, float, float, float]]:
+    line_items = block.get("lines") or []
+    rects = [item.get("rect") for item in line_items if item.get("rect") and len(item.get("rect")) == 4]
+    if not rects:
+        return [rect for rect in (block.get("rects") or []) if len(rect) == 4][:6]
+    if len(rects) <= 3:
+        return rects
+    selected_indexes = set()
+    lower_terms = [term.lower() for term in matched_terms]
+    for index, item in enumerate(line_items[: len(rects)]):
+        line = str(item.get("text") or "").lower()
+        if any(term.lower() in line for term in matched_terms):
+            selected_indexes.add(index)
+            if index > 0:
+                selected_indexes.add(index - 1)
+            if index + 1 < len(rects):
+                selected_indexes.add(index + 1)
+        elif any(term in line for term in lower_terms):
+            selected_indexes.add(index)
+    if not selected_indexes:
+        return rects[: min(len(rects), 5)]
+    return [rects[index] for index in sorted(selected_indexes) if index < len(rects)][:8]
+
+
+def _candidate_signature(text: str) -> str:
+    return re.sub(r"\W+", " ", text.lower()).strip()[:180]
+
+
+def _annotation_candidate_score(text: str, matched_terms: List[str], term_info: Dict[str, Dict[str, Any]]) -> float:
+    lower = text.lower()
+    score = sum(term_info.get(term, {}).get("score", 1) for term in set(matched_terms))
+    score += min(len(text) / 700.0, 1.5)
+    score += sum(1.25 for term in _ANNOTATION_SECTION_TERMS if term in lower)
+    if re.search(r"\b\d+(\.\d+)?\s*(g/l|mg/l|ug/l|microg/l|fold|%)\b", lower):
+        score += 4.0
+    if re.search(r"\b(result|results|discussion|conclusion|we show|we found|we developed|we engineered)\b", lower):
+        score += 2.5
+    if re.search(r"\b(reference|references|et al\.|doi:|copyright|license)\b", lower):
+        score -= 8.0
+    if len(text) < 90:
+        score -= 2.0
+    return round(score, 3)
+
+
+def _page_passage_candidates(
+    *,
+    page: Any,
+    page_number: int,
+    terms: List[str],
+    term_info: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for block in _page_text_blocks(page):
+        text = block.get("text") or ""
+        if _is_boilerplate_line(text):
+            continue
+        lower = text.lower()
+        matched = [term for term in terms if term.lower() in lower]
+        strong_matched = [
+            term
+            for term in matched
+            if term in _PUBMED_DOMAIN_TERMS or term_info.get(term, {}).get("score", 0) >= 8
+        ]
+        if len(set(strong_matched)) < 2:
+            continue
+        strong_matched = _unique_in_order(strong_matched)[:12]
+        rects = _focused_block_rects(block, strong_matched)
+        score = _annotation_candidate_score(text, strong_matched, term_info)
+        candidates.append(
+            {
+                "candidate_id": f"p{page_number}_b{block.get('block_index', len(candidates))}",
+                "page": page_number,
+                "snippet": text[:900],
+                "matched_terms": strong_matched,
+                "score": score,
+                "_rects": rects,
+            }
+        )
+    return candidates
+
+
+async def _llm_refine_annotation_candidates(
+    *,
+    candidates: List[Dict[str, Any]],
+    contexts: Dict[str, str],
+    max_annotations: int,
+) -> List[Dict[str, Any]]:
+    if not candidates or os.getenv("DISABLE_PDF_ANNOTATION_LLM") == "1":
+        return []
+    try:
+        from ollama_client import ollama
+    except Exception:
+        return []
+
+    compact_candidates = [
+        {
+            "candidate_id": item["candidate_id"],
+            "page": item["page"],
+            "snippet": item["snippet"][:900],
+            "matched_terms": item.get("matched_terms") or [],
+        }
+        for item in candidates[:24]
+    ]
+    prompt = f"""
+You are selecting evidence passages from a scientific PDF for a user's project.
+
+Project goal: {contexts.get('project_goal') or 'not provided'}
+Investigation query: {contexts.get('query') or 'not provided'}
+End product: {contexts.get('end_product') or 'not provided'}
+Target host: {contexts.get('host') or 'not provided'}
+Selected objective: {contexts.get('objective_title') or contexts.get('objective') or 'not provided'}
+Collaborator lens: {contexts.get('persona_name') or contexts.get('persona') or 'not provided'}
+
+Choose up to {max_annotations} candidates that are actually useful evidence for this project.
+Reject boilerplate, generic background, license text, author information, and vague passages.
+For each selected candidate, write a specific reason that references the user context it informs.
+
+Candidates:
+{json.dumps(compact_candidates, indent=2)}
+
+Return JSON:
+{{
+  "selected": [
+    {{
+      "candidate_id": "candidate id",
+      "reason": "specific reason tied to query/project/objective/persona",
+      "evidence_role": "benchmark|method|challenge|transferability|boundary_condition|background"
+    }}
+  ]
+}}
+""".strip()
+    try:
+        payload = await ollama.generate_json(prompt, max_retries=1, temperature=0.1, top_p=0.8)
+    except Exception:
+        return []
+    selected = payload.get("selected") if isinstance(payload, dict) else None
+    if not isinstance(selected, list):
+        return []
+    by_id = {item["candidate_id"]: item for item in candidates}
+    refined: List[Dict[str, Any]] = []
+    seen = set()
+    for item in selected:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id") or "").strip()
+        if not candidate_id or candidate_id in seen or candidate_id not in by_id:
+            continue
+        seen.add(candidate_id)
+        reason = str(item.get("reason") or "").strip()
+        evidence_role = str(item.get("evidence_role") or "").strip()
+        candidate = dict(by_id[candidate_id])
+        if reason:
+            candidate["reason"] = reason
+        if evidence_role:
+            candidate["evidence_role"] = evidence_role
+        refined.append(candidate)
+        if len(refined) >= max_annotations:
+            break
+    return refined
+
+
+async def annotate_pdf_for_objective(
     *,
     pdf_path: str | Path,
     query: str,
@@ -1035,43 +1255,53 @@ def annotate_pdf_for_objective(
     doc = fitz.open(str(pdf_path))
     candidates: List[Dict[str, Any]] = []
     for page_index, page in enumerate(doc):
-        text = page.get_text("text") or ""
-        for line in _split_page_lines(text):
-            if _is_boilerplate_line(line):
-                continue
-            lower = line.lower()
-            matched = [term for term in terms if term.lower() in lower]
-            strong_matched = [term for term in matched if term in _PUBMED_DOMAIN_TERMS or term_info.get(term, {}).get("score", 0) >= 8]
-            if len(set(strong_matched)) < 2:
-                continue
-            score = sum(term_info.get(term, {}).get("score", 1) for term in set(strong_matched)) + min(len(line) / 500.0, 1.2)
-            candidates.append(
-                {
-                    "page": page_index + 1,
-                    "snippet": line[:700],
-                    "matched_terms": _unique_in_order(strong_matched)[:10],
-                    "score": round(score, 3),
-                }
+        candidates.extend(
+            _page_passage_candidates(
+                page=page,
+                page_number=page_index + 1,
+                terms=terms,
+                term_info=term_info,
             )
+        )
 
     candidates.sort(key=lambda item: item["score"], reverse=True)
-    selected: List[Dict[str, Any]] = []
+    deduped: List[Dict[str, Any]] = []
     seen = set()
     for item in candidates:
-        key = re.sub(r"\W+", " ", item["snippet"].lower())[:120]
+        key = _candidate_signature(item["snippet"])
         if key in seen:
             continue
         seen.add(key)
-        reason = _annotation_reason(item, term_info, contexts)
-        selected.append({**item, "reason": reason})
+        deduped.append(item)
+
+    selected = await _llm_refine_annotation_candidates(
+        candidates=deduped[:24],
+        contexts=contexts,
+        max_annotations=max(1, min(max_annotations, 20)),
+    )
+    selected_keys = {item.get("candidate_id") for item in selected}
+    for item in deduped:
         if len(selected) >= max(1, min(max_annotations, 20)):
             break
+        if item.get("candidate_id") in selected_keys:
+            continue
+        selected.append({**item, "reason": _annotation_reason(item, term_info, contexts)})
+        selected_keys.add(item.get("candidate_id"))
 
+    public_selected: List[Dict[str, Any]] = []
     for item in selected:
+        if not str(item.get("reason") or "").strip():
+            item["reason"] = _annotation_reason(item, term_info, contexts)
         page = doc[item["page"] - 1]
-        snippet = item["snippet"]
-        rects = page.search_for(snippet)
+        rects = []
+        for rect in item.get("_rects") or []:
+            if len(rect) == 4:
+                rects.append(fitz.Rect(rect))
         if not rects:
+            snippet = item["snippet"]
+            rects = page.search_for(snippet)
+        if not rects:
+            snippet = item["snippet"]
             words = snippet.split()
             for size in [18, 12, 8, 5]:
                 if len(words) >= size:
@@ -1079,18 +1309,30 @@ def annotate_pdf_for_objective(
                     if rects:
                         break
         if rects:
-            annot = page.add_highlight_annot(rects[:4])
+            annot = page.add_highlight_annot(rects[:8])
             annot.set_info(content=item["reason"])
             annot.update()
         else:
             page.add_text_annot((36, 36), item["reason"])
+        public_selected.append(
+            {
+                "page": int(item.get("page") or 0),
+                "snippet": str(item.get("snippet") or "")[:900],
+                "reason": str(item.get("reason") or ""),
+                "matched_terms": item.get("matched_terms") or [],
+                "score": float(item.get("score") or 0),
+            }
+        )
 
     doc.save(str(output_path), garbage=4, deflate=True)
     doc.close()
-    insights = [f"Page {item['page']}: {item['snippet'][:220]}" for item in selected[:5]]
+    insights = [
+        f"Page {item['page']}: {item['reason']} Evidence: {item['snippet'][:180]}"
+        for item in public_selected[:5]
+    ]
     return {
         "annotated_pdf_path": str(output_path),
-        "annotations": selected,
+        "annotations": public_selected,
         "insights": insights,
         "visual_annotations": True,
     }

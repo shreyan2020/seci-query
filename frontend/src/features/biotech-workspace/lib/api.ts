@@ -8,6 +8,7 @@ import type {
   PreparePaperPdfResponse,
   ProjectExecutionRunResponse,
   ProjectFormState,
+  ProjectJourneyResponse,
   ProjectQuerySession,
   ProjectQuerySessionListResponse,
   ResearchFinding,
@@ -158,6 +159,25 @@ export async function createProjectCollaborator(
 export async function fetchProjectQueries(projectId: number): Promise<ProjectQuerySessionListResponse> {
   const response = await fetch(`${API_BASE}/api/projects/${projectId}/queries`, { cache: 'no-store' });
   if (!response.ok) throw new Error('Failed to load project queries');
+  return response.json();
+}
+
+export async function fetchProjectJourney(projectId: number): Promise<ProjectJourneyResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/journey`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to load project journey');
+  return response.json();
+}
+
+export async function logProjectEvent(event_type: string, payload: Record<string, unknown>): Promise<{ status: string }> {
+  const response = await fetch(`${API_BASE}/log_event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event_type, payload }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to log project event');
+  }
   return response.json();
 }
 

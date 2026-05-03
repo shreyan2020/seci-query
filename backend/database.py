@@ -362,6 +362,21 @@ class DatabaseManager:
             row["payload"] = json.loads(row.get("payload") or "{}")
         return rows
 
+    def list_project_events(self, project_id: int, limit: int = 1000) -> List[Dict[str, Any]]:
+        rows = self.list_events(min_id=0, limit=max(limit * 3, limit))
+        filtered: List[Dict[str, Any]] = []
+        for row in rows:
+            payload = row.get("payload") or {}
+            try:
+                payload_project_id = int(payload.get("project_id") or 0)
+            except Exception:
+                payload_project_id = 0
+            if payload_project_id == int(project_id):
+                filtered.append(row)
+            if len(filtered) >= limit:
+                break
+        return filtered
+
     def get_persona_refactor_checkpoint(self, persona_id: int) -> int:
         conn = self._connect()
         cursor = conn.cursor()

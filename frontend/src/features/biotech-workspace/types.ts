@@ -101,6 +101,56 @@ export interface ProjectQuerySessionListResponse {
   queries: ProjectQuerySession[];
 }
 
+export interface ProjectJourneyEvent {
+  id: number;
+  event_type: string;
+  title: string;
+  detail: string;
+  timestamp: string;
+  query_id?: number | null;
+  persona_id?: number | null;
+  objective_id?: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface ProjectJourneyPath {
+  id: string;
+  query_id: number;
+  query_title: string;
+  query: string;
+  selected_persona_id?: number | null;
+  selected_persona_name?: string | null;
+  selected_objective_id?: string | null;
+  selected_objective_title?: string | null;
+  active_flow_step?: string | null;
+  updated_at: string;
+  literature_count: number;
+  judgment_count: number;
+  gap_count: number;
+  proposal_count: number;
+  plan_step_count: number;
+  summary: string;
+  next_action_hint: string;
+  recent_events: ProjectJourneyEvent[];
+}
+
+export interface ProjectJourneySummary {
+  total_queries: number;
+  explored_collaborators: number;
+  explored_objectives: number;
+  literature_findings: number;
+  judgment_calls: number;
+  proposal_candidates: number;
+  event_count: number;
+}
+
+export interface ProjectJourneyResponse {
+  project: Project;
+  summary: ProjectJourneySummary;
+  paths: ProjectJourneyPath[];
+  events: ProjectJourneyEvent[];
+}
+
 export interface ResearchFinding {
   id: string;
   citation: string;

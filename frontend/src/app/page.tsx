@@ -21,6 +21,7 @@ import {
   deleteProject,
   fetchExecutionRun,
   fetchLatestExecutionRun,
+  logProjectEvent,
   fetchProjectLiterature,
   fetchProjectQueries,
   fetchProjects,
@@ -137,10 +138,13 @@ export default function BiotechProjectWorkspace() {
   const searchParams = useSearchParams();
   const routeProjectIdRaw = searchParams.get('projectId') || '';
   const routePersonaIdRaw = searchParams.get('personaId') || '';
+  const routeQueryIdRaw = searchParams.get('queryId') || '';
   const parsedRouteProjectId = Number(routeProjectIdRaw);
   const parsedRoutePersonaId = Number(routePersonaIdRaw);
+  const parsedRouteQueryId = Number(routeQueryIdRaw);
   const routeProjectId = routeProjectIdRaw && Number.isFinite(parsedRouteProjectId) ? parsedRouteProjectId : '';
   const routePersonaId = routePersonaIdRaw && Number.isFinite(parsedRoutePersonaId) ? parsedRoutePersonaId : '';
+  const routeQueryId = routeQueryIdRaw && Number.isFinite(parsedRouteQueryId) ? parsedRouteQueryId : '';
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | ''>('');
@@ -503,8 +507,10 @@ export default function BiotechProjectWorkspace() {
         const rows = response.queries || [];
         setProjectQueries(rows);
         if (rows.length > 0) {
-          setActiveQueryId(rows[0].id);
-          restoreQueryState(rows[0]);
+          const preferred = routeQueryId !== '' ? rows.find((item) => item.id === Number(routeQueryId)) : null;
+          const next = preferred || rows[0];
+          setActiveQueryId(next.id);
+          restoreQueryState(next);
         } else {
           setActiveQueryId('');
           resetQueryDependentState('');
@@ -521,7 +527,7 @@ export default function BiotechProjectWorkspace() {
     return () => {
       cancelled = true;
     };
-  }, [selectedProject?.id]);
+  }, [selectedProject?.id, routeQueryId]);
 
   useEffect(() => {
     if (!selectedProject || activeQueryId === '') {
@@ -890,6 +896,7 @@ export default function BiotechProjectWorkspace() {
       setProjectQueries((current) => [created, ...current]);
       setActiveQueryId(created.id);
       restoreQueryState(created);
+      router.replace(`/?projectId=${selectedProject.id}&queryId=${created.id}`, { scroll: false });
       setNewQueryText('');
       setShowNewQueryForm(false);
       setStatus({ type: 'success', message: 'Created a new query. Choose or create a collaborator next.' });
@@ -903,8 +910,16 @@ export default function BiotechProjectWorkspace() {
   const handleSelectProjectQuery = (queryId: number) => {
     const next = projectQueries.find((item) => item.id === queryId);
     if (!next) return;
+    const nextPersonaId = typeof next.state?.selected_persona_id === 'number' ? next.state.selected_persona_id : '';
     setActiveQueryId(next.id);
     restoreQueryState(next);
+    logProjectEvent('project_query_selected', {
+      project_id: selectedProject?.id,
+      query_id: next.id,
+      query: next.query,
+      persona_id: nextPersonaId || undefined,
+    }).catch(() => {});
+    router.replace(`/?projectId=${selectedProject?.id}${nextPersonaId ? `&personaId=${nextPersonaId}` : ''}&queryId=${next.id}`, { scroll: false });
     setStatus({ type: 'info', message: 'Switched query. Collaborator, objective, and evidence workspace are ready for this investigation.' });
   };
 
@@ -945,6 +960,13 @@ export default function BiotechProjectWorkspace() {
       setManualCollaborator(emptyManualCollaborator);
       setShowManualCollaboratorForm(false);
       setActiveFlowStep('objective');
+      logProjectEvent('project_collaborator_selected', {
+        project_id: selectedProject.id,
+        query_id: activeQueryId === '' ? undefined : activeQueryId,
+        persona_id: response.persona.persona_id,
+        persona_name: response.persona.name,
+        query: focusQuestion,
+      }).catch(() => {});
       scrollToSection(objectiveSectionRef);
       setStatus({ type: 'success', message: `Created and selected ${response.persona.name}.` });
     } catch (error) {
@@ -978,6 +1000,14 @@ export default function BiotechProjectWorkspace() {
     setShowManualObjectiveForm(false);
     setManualObjective(emptyManualObjective);
     setActiveFlowStep('workspace');
+    logProjectEvent('project_objective_selected', {
+      project_id: selectedProject?.id,
+      query_id: activeQueryId === '' ? undefined : activeQueryId,
+      persona_id: selectedPersonaId === '' ? undefined : selectedPersonaId,
+      objective_id: next.id,
+      objective_title: next.title,
+      query: focusQuestion,
+    }).catch(() => {});
     scrollToSection(draftSectionRef);
     setStatus({ type: 'success', message: `Created and selected objective mode: ${next.title}.` });
   };
@@ -1064,6 +1094,14 @@ export default function BiotechProjectWorkspace() {
     setSelectedPersonaId(personaId);
     setCollaboratorPickerCollapsed(true);
     setActiveFlowStep('objective');
+    const persona = selectedProject?.personas.find((item) => item.persona_id === personaId);
+    logProjectEvent('project_collaborator_selected', {
+      project_id: selectedProject?.id,
+      query_id: activeQueryId === '' ? undefined : activeQueryId,
+      persona_id: personaId,
+      persona_name: persona?.name,
+      query: focusQuestion,
+    }).catch(() => {});
     scrollToSection(objectiveSectionRef);
   };
 
@@ -1071,6 +1109,15 @@ export default function BiotechProjectWorkspace() {
     setSelectedObjectiveId(objectiveId);
     setObjectivePickerCollapsed(true);
     setActiveFlowStep('workspace');
+    const objective = objectiveClusters.find((item) => item.id === objectiveId);
+    logProjectEvent('project_objective_selected', {
+      project_id: selectedProject?.id,
+      query_id: activeQueryId === '' ? undefined : activeQueryId,
+      persona_id: selectedPersonaId === '' ? undefined : selectedPersonaId,
+      objective_id: objectiveId,
+      objective_title: objective?.title,
+      query: focusQuestion,
+    }).catch(() => {});
     scrollToSection(draftSectionRef);
   };
 
@@ -1188,6 +1235,16 @@ export default function BiotechProjectWorkspace() {
       const trace = response.tool_trace;
       const traceMessage = `${trace.tool_name} returned ${trace.result_count} result${trace.result_count === 1 ? '' : 's'} for "${trace.query}". Added ${newFindings.length}.`;
       setLiteratureToolStatus(traceMessage);
+      logProjectEvent('project_literature_fetched', {
+        project_id: selectedProject.id,
+        query_id: activeQueryId === '' ? undefined : activeQueryId,
+        persona_id: Number(selectedPersonaId),
+        objective_id: selectedObjective?.id,
+        objective_title: selectedObjective?.title,
+        tool_query: trace.query,
+        result_count: trace.result_count,
+        added_count: newFindings.length,
+      }).catch(() => {});
       setStatus({ type: 'success', message: traceMessage });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to fetch literature';
@@ -1265,6 +1322,16 @@ export default function BiotechProjectWorkspace() {
 
       const message = `${response.message} ${response.visual_annotations ? 'Opened in the in-app PDF reader.' : 'PDF reader opened, but visual highlights were unavailable.'}`;
       setPdfAnnotationStatus(message);
+      logProjectEvent('paper_pdf_annotated', {
+        project_id: selectedProject.id,
+        query_id: activeQueryId === '' ? undefined : activeQueryId,
+        persona_id: Number(selectedPersonaId),
+        objective_id: selectedObjective?.id,
+        objective_title: selectedObjective?.title,
+        paper_id: response.paper_id,
+        citation: finding.citation,
+        annotations: response.annotations.length,
+      }).catch(() => {});
       setStatus({ type: 'success', message });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to prepare annotated PDF';
@@ -1485,6 +1552,7 @@ export default function BiotechProjectWorkspace() {
           selectedProject={Boolean(selectedProject)}
           onReturnToLanding={handleReturnToLanding}
           onOpenMemory={selectedProject ? () => setMemoryDrawerOpen(true) : undefined}
+          journeyHref={selectedProject ? `/journey?projectId=${selectedProject.id}` : undefined}
           memoryItemCount={tacitState.length}
           status={status}
         />
