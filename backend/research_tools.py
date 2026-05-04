@@ -972,9 +972,61 @@ def _annotation_reason(item: Dict[str, Any], term_info: Dict[str, Dict[str, Any]
     source_text = ", ".join(source_labels[:3]) or "the current workspace context"
     anchor_text = "; ".join(anchor_bits[:3])
     term_text = ", ".join(matched[:5])
+    if item.get("is_figure_caption"):
+        if anchor_text:
+            return f"Figure/caption evidence relevant to {source_text} ({anchor_text}); matched terms: {term_text}. Use this mainly to locate the associated pathway, construct, or result figure, then verify details in the surrounding text."
+        return f"Figure/caption evidence relevant to {source_text}; matched terms: {term_text}. Use this mainly to locate the associated figure, then verify details in the surrounding text."
     if anchor_text:
         return f"Relevant to {source_text} ({anchor_text}); matched evidence terms: {term_text}. Use this passage to judge whether the paper informs this specific project context."
     return f"Relevant to {source_text}; matched evidence terms: {term_text}. Use this passage to judge whether the paper informs the current query."
+
+
+def _trim_to_word_boundary(text: str, max_chars: int = 650) -> str:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    clipped = cleaned[:max_chars].rstrip()
+    boundary = max(clipped.rfind(". "), clipped.rfind("? "), clipped.rfind("! "))
+    if boundary >= 180:
+        return clipped[: boundary + 1].strip()
+    word_boundary = clipped.rfind(" ")
+    if word_boundary >= 180:
+        return clipped[:word_boundary].rstrip(" ,;:")
+    return clipped.rstrip(" ,;:")
+
+
+def _looks_like_figure_caption(text: str) -> bool:
+    return bool(re.match(r"^\s*(fig\.?|figure|scheme|table)\s*\d+", text or "", flags=re.IGNORECASE))
+
+
+def _sentence_window_for_terms(text: str, matched_terms: List[str], max_chars: int = 650) -> str:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if not cleaned:
+        return ""
+    if _looks_like_figure_caption(cleaned):
+        return _trim_to_word_boundary(cleaned, max_chars=max_chars)
+
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", cleaned) if sentence.strip()]
+    if len(sentences) <= 1:
+        return _trim_to_word_boundary(cleaned, max_chars=max_chars)
+
+    lower_terms = [term.lower() for term in matched_terms]
+    best_index = 0
+    best_score = -1
+    for index, sentence in enumerate(sentences):
+        lower = sentence.lower()
+        score = sum(1 for term in lower_terms if term in lower)
+        score += 2 if re.search(r"\b(we|this study|result|produced|engineered|increased|titer|yield|pathway)\b", lower) else 0
+        if score > best_score:
+            best_index = index
+            best_score = score
+
+    selected = [sentences[best_index]]
+    if best_index > 0 and len(" ".join(selected)) < max_chars * 0.55:
+        selected.insert(0, sentences[best_index - 1])
+    if best_index + 1 < len(sentences) and len(" ".join(selected)) < max_chars * 0.75:
+        selected.append(sentences[best_index + 1])
+    return _trim_to_word_boundary(" ".join(selected), max_chars=max_chars)
 
 
 def _split_page_lines(text: str) -> List[str]:
@@ -1076,7 +1128,7 @@ def _candidate_signature(text: str) -> str:
     return re.sub(r"\W+", " ", text.lower()).strip()[:180]
 
 
-def _annotation_candidate_score(text: str, matched_terms: List[str], term_info: Dict[str, Dict[str, Any]]) -> float:
+def _annotation_candidate_score(text: str, matched_terms: List[str], term_info: Dict[str, Dict[str, Any]], *, is_caption: bool = False) -> float:
     lower = text.lower()
     score = sum(term_info.get(term, {}).get("score", 1) for term in set(matched_terms))
     score += min(len(text) / 700.0, 1.5)
@@ -1085,6 +1137,10 @@ def _annotation_candidate_score(text: str, matched_terms: List[str], term_info: 
         score += 4.0
     if re.search(r"\b(result|results|discussion|conclusion|we show|we found|we developed|we engineered)\b", lower):
         score += 2.5
+    if is_caption:
+        score -= 3.0
+        if re.search(r"\b(pathway|production|titer|yield|strain|construct|enzyme|genes?)\b", lower):
+            score += 1.5
     if re.search(r"\b(reference|references|et al\.|doi:|copyright|license)\b", lower):
         score -= 8.0
     if len(text) < 90:
@@ -1114,15 +1170,20 @@ def _page_passage_candidates(
         if len(set(strong_matched)) < 2:
             continue
         strong_matched = _unique_in_order(strong_matched)[:12]
+        is_caption = _looks_like_figure_caption(text)
+        snippet = _sentence_window_for_terms(text, strong_matched, max_chars=700)
+        if len(snippet) < 70:
+            continue
         rects = _focused_block_rects(block, strong_matched)
-        score = _annotation_candidate_score(text, strong_matched, term_info)
+        score = _annotation_candidate_score(snippet, strong_matched, term_info, is_caption=is_caption)
         candidates.append(
             {
                 "candidate_id": f"p{page_number}_b{block.get('block_index', len(candidates))}",
                 "page": page_number,
-                "snippet": text[:900],
+                "snippet": snippet,
                 "matched_terms": strong_matched,
                 "score": score,
+                "is_figure_caption": is_caption,
                 "_rects": rects,
             }
         )
@@ -1148,6 +1209,7 @@ async def _llm_refine_annotation_candidates(
             "page": item["page"],
             "snippet": item["snippet"][:900],
             "matched_terms": item.get("matched_terms") or [],
+            "is_figure_caption": bool(item.get("is_figure_caption")),
         }
         for item in candidates[:24]
     ]
@@ -1163,6 +1225,7 @@ Collaborator lens: {contexts.get('persona_name') or contexts.get('persona') or '
 
 Choose up to {max_annotations} candidates that are actually useful evidence for this project.
 Reject boilerplate, generic background, license text, author information, and vague passages.
+Treat figure/table captions as lower-priority location aids: select them only when they directly identify a pathway, construct, measurement, or result the user should inspect.
 For each selected candidate, write a specific reason that references the user context it informs.
 
 Candidates:
@@ -1405,7 +1468,7 @@ async def annotate_pdf_for_objective(
         public_selected.append(
             {
                 "page": int(item.get("page") or 0),
-                "snippet": str(item.get("snippet") or "")[:900],
+                "snippet": _trim_to_word_boundary(str(item.get("snippet") or ""), max_chars=900),
                 "reason": str(item.get("reason") or ""),
                 "matched_terms": item.get("matched_terms") or [],
                 "score": float(item.get("score") or 0),
@@ -1415,7 +1478,7 @@ async def annotate_pdf_for_objective(
     doc.save(str(output_path), garbage=4, deflate=True)
     doc.close()
     insights = [
-        f"Page {item['page']}: {item['reason']} Evidence: {item['snippet'][:180]}"
+        f"Page {item['page']}: {item['reason']} Evidence: {_trim_to_word_boundary(item['snippet'], max_chars=320)}"
         for item in public_selected[:5]
     ]
     return {

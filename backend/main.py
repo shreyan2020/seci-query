@@ -327,6 +327,20 @@ def _trim_work_template_lines(values: Optional[List[str]], limit: int = 6) -> Li
     return out
 
 
+def _trim_to_sentence_boundary(text: str, max_chars: int = 1200) -> str:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    clipped = cleaned[:max_chars].rstrip()
+    boundary = max(clipped.rfind(". "), clipped.rfind("? "), clipped.rfind("! "))
+    if boundary >= max(180, int(max_chars * 0.45)):
+        return clipped[: boundary + 1].strip()
+    word_boundary = clipped.rfind(" ")
+    if word_boundary >= 180:
+        return clipped[:word_boundary].rstrip(" ,;:")
+    return clipped.rstrip(" ,;:")
+
+
 def _work_template_has_content(work_template: Optional[ResearchWorkTemplate]) -> bool:
     if not work_template:
         return False
@@ -1293,7 +1307,7 @@ def _literature_record_to_research_finding(record: dict, index: int) -> Research
         labels=labels,
         knowns=[title] if title else [],
         unknowns=[],
-        relevance=abstract[:900],
+        relevance=_trim_to_sentence_boundary(abstract, max_chars=1200),
         source_ids=source_ids,
     )
 
