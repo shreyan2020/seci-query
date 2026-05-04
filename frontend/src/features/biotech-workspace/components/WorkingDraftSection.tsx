@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { ResearchWorkTemplateSection } from '@/features/biotech-workspace/components/ResearchWorkTemplateSection';
 import type {
   AgenticPlan,
@@ -18,6 +17,10 @@ interface WorkingDraftSectionProps {
   onResearchWorkTemplateChange: (next: ResearchWorkTemplate) => void;
   onFetchLiterature: () => void;
   fetchingLiterature: boolean;
+  onSynthesizeGaps: () => void;
+  synthesizingGaps: boolean;
+  onRunValidationTrack: (findingId: string, trackId: string) => void;
+  runningValidationId?: string | null;
   literatureToolStatus?: string | null;
   literatureObjectiveLens?: string | null;
   literatureProcessingSummary?: string | null;
@@ -25,6 +28,9 @@ interface WorkingDraftSectionProps {
   onPreparePaperPdf?: (finding: ResearchFinding) => void;
   preparingPdfFindingId?: string | null;
   pdfAnnotationStatus?: string | null;
+  literatureReviewStage: 'review' | 'summary' | 'proposal' | 'draft';
+  onCompleteLiteratureReview: (summary: string) => void;
+  onMoveToProposalSynthesis: () => void;
   agenticPlan: AgenticPlan | null;
   selectedPlanStepId: string;
   onSelectPlanStep: (stepId: string) => void;
@@ -42,6 +48,10 @@ export function WorkingDraftSection({
   onResearchWorkTemplateChange,
   onFetchLiterature,
   fetchingLiterature,
+  onSynthesizeGaps,
+  synthesizingGaps,
+  onRunValidationTrack,
+  runningValidationId,
   literatureToolStatus,
   literatureObjectiveLens,
   literatureProcessingSummary,
@@ -49,6 +59,9 @@ export function WorkingDraftSection({
   onPreparePaperPdf,
   preparingPdfFindingId,
   pdfAnnotationStatus,
+  literatureReviewStage,
+  onCompleteLiteratureReview,
+  onMoveToProposalSynthesis,
   agenticPlan,
   selectedPlanStepId,
   onSelectPlanStep,
@@ -56,7 +69,6 @@ export function WorkingDraftSection({
   onGeneratePlan,
   loadingPlan,
 }: WorkingDraftSectionProps) {
-  const [literatureReviewComplete, setLiteratureReviewComplete] = useState(false);
   const selectedPlanStep = agenticPlan?.steps.find((step) => step.id === selectedPlanStepId) || null;
   const modeKey = getModeVisualKey(currentModeTitle);
   const modeShellTone: Record<string, string> = {
@@ -103,11 +115,7 @@ export function WorkingDraftSection({
             <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">
               {selectedObjective ? currentModeTitle : 'Select a mode to open the workspace'}
             </div>
-            <div className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-              {selectedObjective
-                ? currentModeDescription
-                : 'Once a mode is selected on the left, this workspace switches into that setting and becomes the place to generate, inspect, and edit the next draft.'}
-            </div>
+            {selectedObjective && <div className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">{currentModeDescription}</div>}
           </div>
 
           {selectedObjective && (
@@ -125,30 +133,36 @@ export function WorkingDraftSection({
 
       {!selectedObjective ? (
         <div className="relative mt-5 rounded-[1.5rem] border border-dashed border-slate-300 bg-white/75 p-8 text-center text-sm text-slate-600">
-          Choose an objective mode to move the system into a dedicated setting. The draft workspace will then inherit that visual frame,
-          that reasoning style, and that generation behavior.
+          Choose an objective mode to continue.
         </div>
       ) : (
         <>
-          <ResearchWorkTemplateSection
-            workTemplate={researchWorkTemplate}
-            onWorkTemplateChange={onResearchWorkTemplateChange}
-            onFetchLiterature={onFetchLiterature}
-            fetchingLiterature={fetchingLiterature}
-            literatureToolStatus={literatureToolStatus}
-            literatureObjectiveLens={literatureObjectiveLens}
-            literatureProcessingSummary={literatureProcessingSummary}
-            literatureElicitationQuestions={literatureElicitationQuestions}
-            onPreparePaperPdf={onPreparePaperPdf}
-            preparingPdfFindingId={preparingPdfFindingId}
-            pdfAnnotationStatus={pdfAnnotationStatus}
-            reviewComplete={literatureReviewComplete}
-            onCompleteReview={() => setLiteratureReviewComplete(true)}
-            onGeneratePlan={onGeneratePlan}
-            loadingPlan={loadingPlan}
-          />
+          {literatureReviewStage !== 'draft' && (
+            <ResearchWorkTemplateSection
+              workTemplate={researchWorkTemplate}
+              onWorkTemplateChange={onResearchWorkTemplateChange}
+              onFetchLiterature={onFetchLiterature}
+              fetchingLiterature={fetchingLiterature}
+              onSynthesizeGaps={onSynthesizeGaps}
+              synthesizingGaps={synthesizingGaps}
+              onRunValidationTrack={onRunValidationTrack}
+              runningValidationId={runningValidationId}
+              literatureToolStatus={literatureToolStatus}
+              literatureObjectiveLens={literatureObjectiveLens}
+              literatureProcessingSummary={literatureProcessingSummary}
+              literatureElicitationQuestions={literatureElicitationQuestions}
+              onPreparePaperPdf={onPreparePaperPdf}
+              preparingPdfFindingId={preparingPdfFindingId}
+              pdfAnnotationStatus={pdfAnnotationStatus}
+              reviewStage={literatureReviewStage}
+              onCompleteReview={onCompleteLiteratureReview}
+              onMoveToProposalSynthesis={onMoveToProposalSynthesis}
+              onGeneratePlan={onGeneratePlan}
+              loadingPlan={loadingPlan}
+            />
+          )}
 
-          {literatureReviewComplete && agenticPlan && (
+          {literatureReviewStage === 'draft' && agenticPlan && (
             <div className="relative mt-5 space-y-5">
               <div className="rounded-[1.5rem] border border-slate-200 bg-white/90 p-4">
                 <div className="text-lg font-semibold text-slate-950">{agenticPlan.plan_title}</div>
@@ -268,6 +282,64 @@ export function WorkingDraftSection({
                           rows={4}
                           className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
                         />
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div>
+                          <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Source refs</div>
+                          <textarea
+                            value={(selectedPlanStep.source_refs || []).join('\n')}
+                            onChange={(e) =>
+                              onUpdatePlanStep(selectedPlanStep.id, {
+                                source_refs: e.target.value.split('\n').map((item) => item.trim()).filter(Boolean),
+                              })
+                            }
+                            rows={2}
+                            className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                          />
+                        </div>
+                        <div>
+                          <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Gap refs</div>
+                          <textarea
+                            value={(selectedPlanStep.gap_refs || []).join('\n')}
+                            onChange={(e) =>
+                              onUpdatePlanStep(selectedPlanStep.id, {
+                                gap_refs: e.target.value.split('\n').map((item) => item.trim()).filter(Boolean),
+                              })
+                            }
+                            rows={2}
+                            className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div>
+                          <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Judgment refs</div>
+                          <textarea
+                            value={(selectedPlanStep.judgment_refs || []).join('\n')}
+                            onChange={(e) =>
+                              onUpdatePlanStep(selectedPlanStep.id, {
+                                judgment_refs: e.target.value.split('\n').map((item) => item.trim()).filter(Boolean),
+                              })
+                            }
+                            rows={2}
+                            className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                          />
+                        </div>
+                        <div>
+                          <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Validation refs</div>
+                          <textarea
+                            value={(selectedPlanStep.validation_refs || []).join('\n')}
+                            onChange={(e) =>
+                              onUpdatePlanStep(selectedPlanStep.id, {
+                                validation_refs: e.target.value.split('\n').map((item) => item.trim()).filter(Boolean),
+                              })
+                            }
+                            rows={2}
+                            className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                          />
+                        </div>
                       </div>
 
                       <div>

@@ -1209,6 +1209,93 @@ Return JSON:
     return refined
 
 
+def _extract_research_questions_from_text(text: str, max_questions: int = 8, page_label: str = "") -> List[str]:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if not cleaned:
+        return []
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    cues = [
+        "future",
+        "challenge",
+        "remain",
+        "unknown",
+        "further",
+        "improve",
+        "optimization",
+        "potential",
+        "need",
+        "could",
+        "should",
+        "limitation",
+        "bottleneck",
+    ]
+    questions: List[str] = []
+    seen = set()
+    for sentence in sentences:
+        sentence = sentence.strip()
+        lower = sentence.lower()
+        if len(sentence) < 70 or _is_boilerplate_line(sentence):
+            continue
+        if not any(cue in lower for cue in cues) and "?" not in sentence:
+            continue
+        if re.search(r"\b(reference|copyright|license|supplementary|publisher)\b", lower):
+            continue
+        question = sentence if sentence.endswith("?") else f"What project-relevant uncertainty follows from: {sentence[:260].rstrip('.')}?"
+        if page_label:
+            question = f"{page_label}: {question}"
+        key = re.sub(r"\W+", " ", question.lower())[:140]
+        if key in seen:
+            continue
+        seen.add(key)
+        questions.append(question)
+        if len(questions) >= max_questions:
+            break
+    return questions
+
+
+def _extract_research_questions_from_doc(doc: Any, max_questions: int = 8) -> List[str]:
+    page_count = len(doc)
+    section_cues = [
+        "conclusion",
+        "conclusions",
+        "discussion",
+        "future perspective",
+        "future directions",
+        "challenges",
+        "limitations",
+        "outlook",
+    ]
+    candidate_pages: List[int] = []
+    page_texts: Dict[int, str] = {}
+    for index in range(page_count):
+        text = doc[index].get_text("text") or ""
+        page_texts[index] = text
+        head = text[:1800].lower()
+        if any(cue in head for cue in section_cues):
+            candidate_pages.append(index)
+    candidate_pages.extend(range(max(0, page_count - 5), page_count))
+
+    questions: List[str] = []
+    seen = set()
+    for index in dict.fromkeys(candidate_pages):
+        if index < 0 or index >= page_count:
+            continue
+        page_questions = _extract_research_questions_from_text(
+            page_texts.get(index, ""),
+            max_questions=max_questions,
+            page_label=f"Page {index + 1}",
+        )
+        for question in page_questions:
+            key = re.sub(r"\W+", " ", question.lower())[:160]
+            if key in seen:
+                continue
+            seen.add(key)
+            questions.append(question)
+            if len(questions) >= max_questions:
+                return questions
+    return questions
+
+
 async def annotate_pdf_for_objective(
     *,
     pdf_path: str | Path,
@@ -1253,6 +1340,7 @@ async def annotate_pdf_for_objective(
         }
 
     doc = fitz.open(str(pdf_path))
+    research_questions = _extract_research_questions_from_doc(doc, max_questions=8)
     candidates: List[Dict[str, Any]] = []
     for page_index, page in enumerate(doc):
         candidates.extend(
@@ -1334,6 +1422,7 @@ async def annotate_pdf_for_objective(
         "annotated_pdf_path": str(output_path),
         "annotations": public_selected,
         "insights": insights,
+        "research_questions": research_questions,
         "visual_annotations": True,
     }
 

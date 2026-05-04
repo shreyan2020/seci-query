@@ -88,9 +88,6 @@ export function ObjectiveClusteringSection({
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Manual objective mode</div>
-            <div className="mt-1 text-sm leading-6 text-slate-600">
-              Add your own lens if the generated clusters miss the way this query should be handled.
-            </div>
           </div>
           <button
             onClick={onToggleManualObjectiveForm}
@@ -120,7 +117,7 @@ export function ObjectiveClusteringSection({
               onChange={(event) => onManualObjectiveChange('definition', event.target.value)}
               rows={3}
               className="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
-              placeholder="Define how this objective should condition the workspace"
+              placeholder="Objective definition"
             />
             <div className="grid gap-3 lg:grid-cols-3">
               <textarea
@@ -142,7 +139,7 @@ export function ObjectiveClusteringSection({
                 onChange={(event) => onManualObjectiveChange('exemplar_answer', event.target.value)}
                 rows={3}
                 className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
-                placeholder="What a good answer should look like"
+                placeholder="Exemplar answer"
               />
             </div>
             <div className="flex justify-end">

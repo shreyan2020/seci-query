@@ -21,11 +21,6 @@ export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemo
             Biotech Program Workspace
           </div>
           <h1 className="mt-4 text-3xl font-semibold tracking-tight text-slate-950 md:text-4xl">Biotech project workspace</h1>
-          <p className="mt-3 text-sm leading-6 text-slate-600 md:text-base">
-            Start with the project goal, write the working question you actually want answered, and let the system surface the
-            collaborators that fit that question. From there, capture structured literature-to-proposal reasoning before generating a
-            draft that can stay literature-first, experiment-first, or broader depending on what you ask.
-          </p>
         </div>
 
         <div className="flex flex-wrap gap-2">

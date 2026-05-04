@@ -48,8 +48,10 @@ from models import (
     ProjectWorkspaceState, ProjectWorkspaceRequest, ProjectWorkspaceResponse,
     StartProjectExecutionRequest, ProjectExecutionEvent, ProjectExecutionRunResponse,
     FetchProjectLiteratureRequest, FetchProjectLiteratureResponse, LiteratureToolTrace, ResearchFinding,
+    SynthesizeLiteratureGapsRequest, SynthesizeLiteratureGapsResponse, ResearchGap,
     PreparePaperPdfRequest, PreparePaperPdfResponse, PaperAnnotation,
     TacitMemoryItem, WorkspaceMemory, WorkspaceMemoryRequest, WorkspaceMemoryResponse,
+    RunValidationTrackRequest, RunValidationTrackResponse,
 )
 from ollama_client import ollama
 from database import db
@@ -363,6 +365,9 @@ def _work_template_to_prompt_text(work_template: Optional[ResearchWorkTemplate])
     if work_template and work_template.initial_query.strip():
         sections.append(f"Initial query:\n{work_template.initial_query.strip()}")
 
+    if work_template and work_template.synthesis_memo.strip():
+        sections.append(f"Finalized literature review summary:\n{work_template.synthesis_memo.strip()}")
+
     if work_template and work_template.literature_findings:
         entries: List[str] = []
         for index, finding in enumerate(work_template.literature_findings[:6], start=1):
@@ -378,8 +383,41 @@ def _work_template_to_prompt_text(work_template: Optional[ResearchWorkTemplate])
             if unknowns:
                 lines.append("   Unknowns:")
                 lines.extend(f"   - {item}" for item in unknowns)
+            annotation_insights = _trim_work_template_lines(finding.annotation_insights, limit=5)
+            if annotation_insights:
+                lines.append("   System PDF annotations:")
+                lines.extend(f"   - {item}" for item in annotation_insights)
+            generated_questions = _trim_work_template_lines(finding.generated_questions, limit=5)
+            if generated_questions:
+                lines.append("   Inferred research questions from conclusion/discussion:")
+                lines.extend(f"   - {item}" for item in generated_questions)
+            paper_judgments = [
+                item for item in finding.judgment_calls[:4] if isinstance(item, dict) and str(item.get("stance") or "").strip()
+            ]
+            if paper_judgments:
+                lines.append("   User paper judgments:")
+                for judgment in paper_judgments:
+                    lines.append(f"   - {str(judgment.get('stance') or '').strip()}")
+                    if str(judgment.get("implication") or "").strip():
+                        lines.append(f"     Implication: {str(judgment.get('implication') or '').strip()}")
+            paper_validations = [
+                item for item in finding.validation_tracks[:4] if isinstance(item, dict) and str(item.get("target") or "").strip()
+            ]
+            if paper_validations:
+                lines.append("   Paper-specific validation or tool paths:")
+                for track in paper_validations:
+                    lines.append(f"   - Target: {str(track.get('target') or '').strip()}")
+                    if str(track.get("method") or "").strip():
+                        lines.append(f"     Method/tool path: {str(track.get('method') or '').strip()}")
+                    execution_result = track.get("execution_result") if isinstance(track.get("execution_result"), dict) else {}
+                    if execution_result:
+                        result_count = execution_result.get("result_count")
+                        tool_name = execution_result.get("tool") or "validation tool"
+                        lines.append(f"     Executed result: {tool_name} returned {result_count if result_count is not None else 'recorded'} result(s).")
             if finding.relevance.strip():
                 lines.append(f"   Why it matters: {finding.relevance.strip()}")
+            if finding.synthesis_memo.strip():
+                lines.append(f"   User memo: {finding.synthesis_memo.strip()}")
             entries.append("\n".join(lines))
         sections.append("Literature findings:\n" + "\n".join(entries))
 
@@ -436,6 +474,16 @@ def _work_template_to_prompt_text(work_template: Optional[ResearchWorkTemplate])
             if readouts:
                 lines.append("   Readouts:")
                 lines.extend(f"   - {item}" for item in readouts)
+            trace_lines = [
+                ("Source refs", proposal.source_refs),
+                ("Gap refs", proposal.gap_refs),
+                ("Judgment refs", proposal.judgment_refs),
+                ("Validation refs", proposal.validation_refs),
+            ]
+            for label, values in trace_lines:
+                refs = _trim_work_template_lines(values, limit=4)
+                if refs:
+                    lines.append(f"   {label}: {', '.join(refs)}")
             entries.append("\n".join(lines))
         sections.append("Proposal seeds:\n" + "\n".join(entries))
 
@@ -814,6 +862,10 @@ def _fallback_project_plan(project: dict, persona: dict, request: GenerateProjec
                 evidence_facts=item["facts"],
                 examples=examples,
                 dependencies=dependencies,
+                source_refs=finding_citations[:2],
+                gap_refs=gap_themes[:2],
+                judgment_refs=judgment_stances[:2],
+                validation_refs=validation_targets[:2],
                 expected_outcome=item["outcome"],
                 confidence=max(0.45, 0.82 - (index - 1) * 0.06),
             )
@@ -2053,6 +2105,115 @@ async def save_project_workspace_state(project_id: int, persona_id: int, request
     return _workspace_state_to_response(state)
 
 
+def _gap_source_text(work_template: ResearchWorkTemplate) -> str:
+    chunks: List[str] = []
+    if work_template.synthesis_memo.strip():
+        chunks.append(work_template.synthesis_memo.strip())
+    for finding in work_template.literature_findings:
+        chunks.extend(finding.knowns)
+        chunks.extend(finding.unknowns)
+        chunks.extend(finding.annotation_insights)
+        if finding.relevance.strip():
+            chunks.append(finding.relevance.strip())
+        if finding.synthesis_memo.strip():
+            chunks.append(finding.synthesis_memo.strip())
+        for judgment in finding.judgment_calls:
+            if isinstance(judgment, dict):
+                chunks.extend(str(judgment.get(key) or "").strip() for key in ["stance", "rationale", "implication"])
+        for track in finding.validation_tracks:
+            if isinstance(track, dict):
+                chunks.extend(str(track.get(key) or "").strip() for key in ["target", "method", "success_signal"])
+                questions = track.get("questions") if isinstance(track.get("questions"), list) else []
+                chunks.extend(str(item or "").strip() for item in questions)
+    for judgment in work_template.judgment_calls:
+        chunks.extend([judgment.stance, judgment.rationale, judgment.implication])
+    for track in work_template.validation_tracks:
+        chunks.extend([track.target, track.method, track.success_signal, *track.questions])
+    return "\n".join(item for item in chunks if item)
+
+
+def _fallback_gap_synthesis(request: SynthesizeLiteratureGapsRequest) -> SynthesizeLiteratureGapsResponse:
+    source_text = _gap_source_text(request.work_template)
+    lower = source_text.lower()
+    specs = [
+        ("AI-enabled enzyme improvement", ["ai", "enzyme", "structure", "model", "generative", "activity", "side activity", "expression", "ugt", "fls", "f3h"], "Which enzymes should be improved, and what assay condition proves the variant is better?", "Prioritize if enzyme activity, specificity, or expression limits the target pathway."),
+        ("Synthetic biology method selection", ["crispr", "biosensor", "evolution", "co-culture", "coculture", "dynamic", "regulation"], "Which synthetic biology tool is worth using versus treating as out of scope?", "Separate methods already routine in the lab from methods that require new capability."),
+        ("Generalization and transferability", ["transfer", "generaliz", "similar", "condition", "target compound", "analogy", "from glucose", "substrate"], "Does a result from one flavonoid, host, or feed condition transfer to the user's target?", "Use this to convert promising analogies into explicit validation experiments."),
+        ("Pathway and precursor bottlenecks", ["pathway", "malonyl", "precursor", "flux", "degradation", "intermediate", "substrate", "cofactor"], "Which pathway step or precursor pool is the likely bottleneck for the target product?", "Strong candidate for near-term strain design decisions."),
+        ("Process and measurement boundary conditions", ["oxygen", "feed", "media", "fermentation", "titer", "yield", "productivity", "measurement", "assay"], "Which process condition or readout determines whether the literature result is useful?", "Needed before translating literature examples into an experiment plan."),
+        ("Database or external validation path", ["uniprot", "database", "homolog", "sequence", "blast", "alphafold", "modeling", "tool"], "Which external database or computational check should be run before committing experiments?", "Use for evidence that can be gathered before wet-lab work."),
+    ]
+    gaps: List[ResearchGap] = []
+    for title, keywords, question, priority in specs:
+        signals = [keyword for keyword in keywords if keyword in lower]
+        if not signals:
+            continue
+        gap_id = "gap_" + re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
+        gaps.append(ResearchGap(id=gap_id, theme=title, supporting_signals=signals[:6], next_question=question, priority_note=priority))
+    if not gaps and request.work_template.literature_findings:
+        gaps.append(
+            ResearchGap(
+                id="gap_transferability",
+                theme="Transferability of literature examples",
+                supporting_signals=[item for finding in request.work_template.literature_findings[:4] for item in finding.unknowns[:1] if item.strip()][:5],
+                next_question="Which fetched result is close enough to the target project to justify an experiment?",
+                priority_note="Use user judgment to separate strong evidence from loose analogy.",
+            )
+        )
+    limit = max(1, min(request.max_gaps or 6, 10))
+    return SynthesizeLiteratureGapsResponse(gaps=gaps[:limit], synthesis_summary=f"Generated {len(gaps[:limit])} editable gap cluster(s).")
+
+
+async def _synthesize_literature_gaps_with_llm(
+    project: dict,
+    persona: dict,
+    request: SynthesizeLiteratureGapsRequest,
+) -> SynthesizeLiteratureGapsResponse:
+    fallback = _fallback_gap_synthesis(request)
+    source_text = _gap_source_text(request.work_template)
+    if not source_text.strip():
+        return fallback
+    limit = max(1, min(request.max_gaps or 6, 10))
+    prompt = f"""
+You are clustering research gaps from a biotech literature review. Return strict JSON only.
+
+Project goal: {request.project_goal or project.get('project_goal') or ''}
+End product: {request.project_end_product or project.get('end_product') or ''}
+Target host: {request.project_target_host or project.get('target_host') or ''}
+Query: {request.query}
+Objective: {request.objective_title or ''} {request.objective_definition or ''}
+Collaborator: {persona.get('name') or ''}
+
+Reviewed literature state:
+{source_text[:14000]}
+
+Create up to {limit} editable gap clusters. Prefer AI enzyme design, synthetic biology tools, process/measurement boundaries, pathway bottlenecks, and generalization validity only when supported by the reviewed state. Do not invent unsupported tool paths or papers.
+
+Return JSON:
+{{
+  "synthesis_summary": "short summary",
+  "gaps": [
+    {{
+      "id": "stable snake_case id",
+      "theme": "gap cluster title",
+      "supporting_signals": ["specific evidence phrase from reviewed state"],
+      "next_question": "decision-oriented question",
+      "priority_note": "why this gap matters or when to ignore it"
+    }}
+  ]
+}}
+""".strip()
+    try:
+        payload = await ollama.generate_json(prompt, max_retries=1, temperature=0.15, top_p=0.9)
+        raw_gaps = payload.get("gaps") if isinstance(payload, dict) else []
+        gaps = [ResearchGap.model_validate(item) for item in raw_gaps if isinstance(item, dict)]
+        if gaps:
+            return SynthesizeLiteratureGapsResponse(gaps=gaps[:limit], synthesis_summary=str(payload.get("synthesis_summary") or fallback.synthesis_summary))
+    except Exception:
+        pass
+    return fallback
+
+
 @app.post("/api/projects/{project_id}/literature", response_model=FetchProjectLiteratureResponse)
 async def fetch_project_literature(project_id: int, request: FetchProjectLiteratureRequest):
     project = db.get_project(project_id)
@@ -2158,6 +2319,100 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
         raise HTTPException(status_code=502, detail=f"Literature fetch failed via {trace.tool_name}: {exc}") from exc
 
 
+@app.post("/api/projects/{project_id}/literature/gaps", response_model=SynthesizeLiteratureGapsResponse)
+async def synthesize_project_literature_gaps(project_id: int, request: SynthesizeLiteratureGapsRequest):
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    persona = db.get_persona(request.persona_id)
+    if not persona:
+        raise HTTPException(status_code=404, detail="Persona not found")
+    if not _persona_belongs_to_project(persona, project):
+        raise HTTPException(status_code=400, detail="Selected persona does not belong to this project")
+
+    response = await _synthesize_literature_gaps_with_llm(project, persona, request)
+    await log_event_safe(
+        "project_literature_gaps_synthesized",
+        {
+            "project_id": project_id,
+            "persona_id": request.persona_id,
+            "objective_id": request.objective_id,
+            "gap_count": len(response.gaps),
+        },
+    )
+    return response
+
+
+async def _run_uniprot_validation(track: Any) -> Dict[str, Any]:
+    query = " ".join([track.target, *track.questions]).strip() or track.method.strip()
+    query = query[:220]
+    timeout = httpx.Timeout(30.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        response = await client.get(
+            "https://rest.uniprot.org/uniprotkb/search",
+            params={
+                "query": query,
+                "format": "json",
+                "size": 5,
+                "fields": "accession,id,protein_name,gene_names,organism_name,reviewed,cc_function",
+            },
+        )
+        response.raise_for_status()
+    payload = response.json() or {}
+    results = []
+    for item in payload.get("results", [])[:5]:
+        protein = item.get("proteinDescription") or {}
+        recommended = protein.get("recommendedName") or {}
+        name = ((recommended.get("fullName") or {}).get("value") or item.get("uniProtkbId") or "").strip()
+        genes = [gene.get("geneName", {}).get("value") for gene in item.get("genes", []) if gene.get("geneName")]
+        organism = ((item.get("organism") or {}).get("scientificName") or "").strip()
+        comments = item.get("comments") or []
+        function_text = ""
+        for comment in comments:
+            if comment.get("commentType") == "FUNCTION":
+                texts = comment.get("texts") or []
+                function_text = " ".join(str(text.get("value") or "") for text in texts[:2]).strip()
+                break
+        results.append(
+            {
+                "accession": item.get("primaryAccession"),
+                "id": item.get("uniProtkbId"),
+                "name": name,
+                "genes": [gene for gene in genes if gene],
+                "organism": organism,
+                "reviewed": bool(item.get("entryType", "").lower().startswith("reviewed")),
+                "function": function_text[:600],
+            }
+        )
+    return {"tool": "UniProt", "query": query, "result_count": len(results), "results": results}
+
+
+@app.post("/api/projects/{project_id}/validation/run", response_model=RunValidationTrackResponse)
+async def run_project_validation_track(project_id: int, request: RunValidationTrackRequest):
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    persona = db.get_persona(request.persona_id)
+    if not persona:
+        raise HTTPException(status_code=404, detail="Persona not found")
+    if not _persona_belongs_to_project(persona, project):
+        raise HTTPException(status_code=400, detail="Selected persona does not belong to this project")
+
+    method_text = f"{request.track.method} {request.track.target}".lower()
+    if not any(term in method_text for term in ["uniprot", "protein", "enzyme", "homolog", "sequence"]):
+        return RunValidationTrackResponse(
+            status="unsupported",
+            message="This validation path is captured, but no executable runner is available yet.",
+            result={"method": request.track.method, "target": request.track.target},
+        )
+    try:
+        result = await _run_uniprot_validation(request.track)
+        return RunValidationTrackResponse(status="success", message=f"Ran UniProt lookup and found {result.get('result_count', 0)} result(s).", result=result)
+    except Exception as exc:
+        return RunValidationTrackResponse(status="error", message=f"Validation run failed: {exc}", result={})
+
+
 @app.post("/api/projects/{project_id}/literature/pdf", response_model=PreparePaperPdfResponse)
 async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfRequest):
     project = db.get_project(project_id)
@@ -2245,6 +2500,7 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
                     "objective_title": request.objective_title,
                     "annotations": [item.model_dump() for item in annotations],
                     "insights": annotation_result.get("insights") or [],
+                    "research_questions": annotation_result.get("research_questions") or [],
                     "source_pdf_url": download.get("source_pdf_url"),
                 },
                 indent=2,
@@ -2276,6 +2532,7 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
             annotated_pdf_url=f"/api/projects/{project_id}/literature/pdf/{paper_id}/annotated",
             annotations=annotations,
             insights=[str(item) for item in (annotation_result.get("insights") or [])],
+            research_questions=[str(item) for item in (annotation_result.get("research_questions") or [])],
             visual_annotations=bool(annotation_result.get("visual_annotations")),
         )
     except Exception as exc:

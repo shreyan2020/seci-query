@@ -13,6 +13,8 @@ import type {
   ProjectQuerySessionListResponse,
   ResearchFinding,
   ResearchWorkTemplate,
+  SynthesizeLiteratureGapsResponse,
+  ValidationTrack,
   ProjectsResponse,
   TacitMemoryItem,
   ProjectWorkspaceResponse,
@@ -127,6 +129,56 @@ export async function fetchProjectLiterature(
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
     throw new Error(err.detail || 'Failed to fetch literature');
+  }
+  return response.json();
+}
+
+export async function synthesizeLiteratureGaps(
+  projectId: number,
+  payload: {
+    persona_id: number;
+    query: string;
+    project_goal?: string;
+    project_end_product?: string;
+    project_target_host?: string;
+    objective_id?: string;
+    objective_title?: string;
+    objective_definition?: string;
+    objective_signals?: string[];
+    work_template: ResearchWorkTemplate;
+    max_gaps?: number;
+  }
+): Promise<SynthesizeLiteratureGapsResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/literature/gaps`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to synthesize literature gaps');
+  }
+  return response.json();
+}
+
+export async function runValidationTrack(
+  projectId: number,
+  payload: {
+    persona_id: number;
+    track: ValidationTrack;
+    query?: string;
+    project_goal?: string;
+    objective_title?: string;
+  }
+): Promise<{ status: 'success' | 'unsupported' | 'error'; message: string; result: Record<string, unknown> }> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/validation/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to run validation');
   }
   return response.json();
 }

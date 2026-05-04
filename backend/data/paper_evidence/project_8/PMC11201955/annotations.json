@@ -1,0 +1,140 @@
+{
+  "finding": {
+    "id": "finding_10_3390_biom14060712",
+    "citation": "De Novo Synthesis of Resveratrol from Sucrose by Metabolically Engineered Yarrowia lipolytica.. Biomolecules. 2024. PMID: 38927115",
+    "labels": [
+      "pubmed",
+      "literature fetch",
+      "2024",
+      "PMID: 38927115",
+      "PMCID: PMC11201955",
+      "DOI: 10.3390/biom14060712"
+    ],
+    "knowns": [
+      "De Novo Synthesis of Resveratrol from Sucrose by Metabolically Engineered Yarrowia lipolytica."
+    ],
+    "unknowns": [],
+    "relevance": "Resveratrol, a phenylpropanoid compound, exhibits diverse pharmacological properties, making it a valuable candidate for health and disease management. However, the demand for resveratrol exceeds the capacity of plant extraction methods, necessitating alternative production strategies. Microbial synthesis offers several advantages over plant-based approaches and presents a promising alternative. Yarrowia lipolytica stands out among microbial hosts due to its safe nature, abundant acetyl-CoA and malonyl-CoA availability, and robust pentose phosphate pathway. This study aimed to engineer Y. lipolytica for resveratrol production. The resveratrol biosynthetic pathway was integrated into Y. lipolytica by adding genes encoding tyrosine ammonia lyase from Rhodotorula glutinis, 4-coumarate CoA ligase from Nicotiana tabacum, and stilbene synthase from Vitis vinifera. This resulted in the producti",
+    "source_ids": {
+      "pmid": "38927115",
+      "pmcid": "PMC11201955",
+      "doi": "10.3390/biom14060712"
+    }
+  },
+  "query": "What are the key successful common strategies and examples in Resveratrol production? What are the latest improvement options / key challenges in the future?",
+  "objective_id": "obj_experiments",
+  "objective_title": "Experiment design",
+  "annotations": [
+    {
+      "page": 1,
+      "snippet": "study aimed to engineer Y. lipolytica for resveratrol production. The resveratrol biosynthetic pathway",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Experiment design'); matched evidence terms: resveratrol, production, pathway, lipolytica, engineer. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "production",
+        "pathway",
+        "lipolytica",
+        "engineer",
+        "biosynthetic"
+      ],
+      "score": 127.204
+    },
+    {
+      "page": 2,
+      "snippet": "Figure 1. Resveratrol synthesis pathway and genes and enzymes involved in Y. lipolytica engineering",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Experiment design'); matched evidence terms: resveratrol, pathway, synthesis, lipolytica, engineer. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "pathway",
+        "synthesis",
+        "lipolytica",
+        "engineer"
+      ],
+      "score": 118.198
+    },
+    {
+      "page": 11,
+      "snippet": "Ibrahim, G.G.; Yan, J.; Xu, L.; Yang, M.; Yan, Y. Resveratrol production in yeast hosts: Current status and perspectives. Biomolecules",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Experiment design'); matched evidence terms: resveratrol, yeast, production. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "yeast",
+        "production"
+      ],
+      "score": 109.268
+    },
+    {
+      "page": 5,
+      "snippet": "Figure 2. p-CA and resveratrol production in di\ufb00erent engineered Y. lipolytica strains after 120 h of",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Experiment design'); matched evidence terms: resveratrol, production, lipolytica, engineer, engineered. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "production",
+        "lipolytica",
+        "engineer",
+        "engineered"
+      ],
+      "score": 106.202
+    },
+    {
+      "page": 5,
+      "snippet": "Figure 2. p-CA and resveratrol production in different engineered Y. lipolytica strains after 120 h",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Experiment design'); matched evidence terms: resveratrol, production, lipolytica, engineer, engineered. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "production",
+        "lipolytica",
+        "engineer",
+        "engineered"
+      ],
+      "score": 106.198
+    },
+    {
+      "page": 10,
+      "snippet": "Y. lipolytica was successfully engineered with resveratrol pathway genes RgTAL, Nt4CL,",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Experiment design'); matched evidence terms: resveratrol, pathway, lipolytica, engineer, engineered. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "pathway",
+        "lipolytica",
+        "engineer",
+        "engineered"
+      ],
+      "score": 105.172
+    },
+    {
+      "page": 10,
+      "snippet": "Y. lipolytica was successfully engineered with resveratrol pathway genes RgTAL,",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Experiment design'); matched evidence terms: resveratrol, pathway, lipolytica, engineer, engineered. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "pathway",
+        "lipolytica",
+        "engineer",
+        "engineered"
+      ],
+      "score": 105.158
+    },
+    {
+      "page": 1,
+      "snippet": "Keywords: resveratrol; microbial cell factory; metabolic engineering; Yarrowia lipolytica",
+      "reason": "Relevant to the investigation query, the project goal, the target end product (end product 'Resveratrol'; host 'Saccharomyces cerevisiae'; objective 'Experiment design'); matched evidence terms: resveratrol, lipolytica, microbial, yarrowia, engineer. Use this passage to judge whether the paper informs this specific project context.",
+      "matched_terms": [
+        "resveratrol",
+        "lipolytica",
+        "microbial",
+        "yarrowia",
+        "engineer"
+      ],
+      "score": 101.178
+    }
+  ],
+  "insights": [
+    "Page 1: study aimed to engineer Y. lipolytica for resveratrol production. The resveratrol biosynthetic pathway",
+    "Page 2: Figure 1. Resveratrol synthesis pathway and genes and enzymes involved in Y. lipolytica engineering",
+    "Page 11: Ibrahim, G.G.; Yan, J.; Xu, L.; Yang, M.; Yan, Y. Resveratrol production in yeast hosts: Current status and perspectives. Biomolecules",
+    "Page 5: Figure 2. p-CA and resveratrol production in di\ufb00erent engineered Y. lipolytica strains after 120 h of",
+    "Page 5: Figure 2. p-CA and resveratrol production in different engineered Y. lipolytica strains after 120 h"
+  ],
+  "source_pdf_url": "https://europepmc.org/articles/PMC11201955?pdf=render"
+}

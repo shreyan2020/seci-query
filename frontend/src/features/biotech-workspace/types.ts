@@ -13,6 +13,10 @@ export interface PlanStep {
   evidence_facts: string[];
   examples: string[];
   dependencies: string[];
+  source_refs: string[];
+  gap_refs: string[];
+  judgment_refs: string[];
+  validation_refs: string[];
   expected_outcome: string;
   confidence: number;
 }
@@ -159,6 +163,9 @@ export interface ResearchFinding {
   unknowns: string[];
   relevance: string;
   source_ids?: Record<string, string>;
+  annotation_insights?: string[];
+  generated_questions?: string[];
+  annotations?: PaperAnnotation[];
   judgment_calls?: JudgmentCall[];
   validation_tracks?: ValidationTrack[];
   synthesis_memo?: string;
@@ -185,6 +192,7 @@ export interface ValidationTrack {
   method: string;
   questions: string[];
   success_signal: string;
+  execution_result?: Record<string, unknown>;
 }
 
 export interface ProposalCandidate {
@@ -193,6 +201,10 @@ export interface ProposalCandidate {
   why_now: string;
   experiment_outline: string;
   readouts: string[];
+  source_refs?: string[];
+  gap_refs?: string[];
+  judgment_refs?: string[];
+  validation_refs?: string[];
 }
 
 export interface ResearchWorkTemplate {
@@ -221,6 +233,11 @@ export interface FetchProjectLiteratureResponse {
   elicitation_questions: string[];
 }
 
+export interface SynthesizeLiteratureGapsResponse {
+  gaps: ResearchGap[];
+  synthesis_summary: string;
+}
+
 export interface PaperAnnotation {
   page: number;
   snippet: string;
@@ -241,6 +258,7 @@ export interface PreparePaperPdfResponse {
   annotated_pdf_url?: string | null;
   annotations: PaperAnnotation[];
   insights: string[];
+  research_questions: string[];
   visual_annotations: boolean;
 }
 

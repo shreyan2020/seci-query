@@ -67,6 +67,10 @@ class PlanStep(BaseModel):
     evidence_facts: List[str] = Field(default_factory=list)
     examples: List[str] = Field(default_factory=list)
     dependencies: List[str] = Field(default_factory=list)
+    source_refs: List[str] = Field(default_factory=list)
+    gap_refs: List[str] = Field(default_factory=list)
+    judgment_refs: List[str] = Field(default_factory=list)
+    validation_refs: List[str] = Field(default_factory=list)
     expected_outcome: str
     confidence: float = 0.5
 
@@ -682,6 +686,11 @@ class ResearchFinding(BaseModel):
     unknowns: List[str] = Field(default_factory=list)
     relevance: str = ""
     source_ids: Dict[str, str] = Field(default_factory=dict)
+    annotation_insights: List[str] = Field(default_factory=list)
+    generated_questions: List[str] = Field(default_factory=list)
+    judgment_calls: List[Dict[str, Any]] = Field(default_factory=list)
+    validation_tracks: List[Dict[str, Any]] = Field(default_factory=list)
+    synthesis_memo: str = ""
 
 
 class ResearchGap(BaseModel):
@@ -705,6 +714,7 @@ class ValidationTrack(BaseModel):
     method: str = ""
     questions: List[str] = Field(default_factory=list)
     success_signal: str = ""
+    execution_result: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ProposalCandidate(BaseModel):
@@ -713,6 +723,10 @@ class ProposalCandidate(BaseModel):
     why_now: str = ""
     experiment_outline: str = ""
     readouts: List[str] = Field(default_factory=list)
+    source_refs: List[str] = Field(default_factory=list)
+    gap_refs: List[str] = Field(default_factory=list)
+    judgment_refs: List[str] = Field(default_factory=list)
+    validation_refs: List[str] = Field(default_factory=list)
 
 
 class ResearchWorkTemplate(BaseModel):
@@ -742,6 +756,39 @@ class FetchProjectLiteratureRequest(BaseModel):
     work_template: Optional[ResearchWorkTemplate] = None
     max_results: int = 5
     existing_citations: List[str] = Field(default_factory=list)
+
+
+class SynthesizeLiteratureGapsRequest(BaseModel):
+    persona_id: int
+    query: str
+    project_goal: Optional[str] = None
+    project_end_product: Optional[str] = None
+    project_target_host: Optional[str] = None
+    objective_id: Optional[str] = None
+    objective_title: Optional[str] = None
+    objective_definition: Optional[str] = None
+    objective_signals: List[str] = Field(default_factory=list)
+    work_template: ResearchWorkTemplate
+    max_gaps: int = 6
+
+
+class SynthesizeLiteratureGapsResponse(BaseModel):
+    gaps: List[ResearchGap] = Field(default_factory=list)
+    synthesis_summary: str = ""
+
+
+class RunValidationTrackRequest(BaseModel):
+    persona_id: int
+    track: ValidationTrack
+    query: Optional[str] = None
+    project_goal: Optional[str] = None
+    objective_title: Optional[str] = None
+
+
+class RunValidationTrackResponse(BaseModel):
+    status: Literal["success", "unsupported", "error"]
+    message: str
+    result: Dict[str, Any] = Field(default_factory=dict)
 
 
 class LiteratureToolTrace(BaseModel):
@@ -796,6 +843,7 @@ class PreparePaperPdfResponse(BaseModel):
     annotated_pdf_url: Optional[str] = None
     annotations: List[PaperAnnotation] = Field(default_factory=list)
     insights: List[str] = Field(default_factory=list)
+    research_questions: List[str] = Field(default_factory=list)
     visual_annotations: bool = False
 
 
