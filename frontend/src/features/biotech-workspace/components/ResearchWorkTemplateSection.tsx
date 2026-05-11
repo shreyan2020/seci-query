@@ -18,12 +18,13 @@ interface ResearchWorkTemplateSectionProps {
   synthesizingGaps: boolean;
   onRunValidationTrack: (findingId: string, trackId: string) => void;
   runningValidationId?: string | null;
-  literatureToolStatus?: string | null;
   literatureObjectiveLens?: string | null;
   literatureProcessingSummary?: string | null;
   literatureElicitationQuestions?: string[];
   onPreparePaperPdf?: (finding: ResearchFinding) => void;
+  onBuildPaperOntology?: (finding: ResearchFinding) => void;
   preparingPdfFindingId?: string | null;
+  buildingPaperOntologyId?: string | null;
   pdfAnnotationStatus?: string | null;
   reviewStage: 'review' | 'summary' | 'proposal' | 'draft';
   onCompleteReview: (summary: string) => void;
@@ -284,12 +285,13 @@ export function ResearchWorkTemplateSection({
   synthesizingGaps,
   onRunValidationTrack,
   runningValidationId,
-  literatureToolStatus,
   literatureObjectiveLens,
   literatureProcessingSummary,
   literatureElicitationQuestions = [],
   onPreparePaperPdf,
+  onBuildPaperOntology,
   preparingPdfFindingId,
+  buildingPaperOntologyId,
   pdfAnnotationStatus,
   reviewStage,
   onCompleteReview,
@@ -529,37 +531,9 @@ export function ResearchWorkTemplateSection({
               </button>
             </div>
 
-            {literatureToolStatus && (
-              <div className="mt-3 rounded-2xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-medium text-sky-950">
-                {literatureToolStatus}
-              </div>
-            )}
-
             {pdfAnnotationStatus && (
               <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-950">
                 {pdfAnnotationStatus}
-              </div>
-            )}
-
-            {(literatureProcessingSummary || literatureObjectiveLens) && (
-              <div className="mt-3 rounded-[1.4rem] border border-sky-200 bg-[linear-gradient(135deg,rgba(239,246,255,0.98),rgba(240,253,250,0.9))] p-4">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                  <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-800">Literature Processing</div>
-                    <div className="mt-1 text-sm font-semibold text-slate-950">Objective-conditioned evidence review</div>
-                  </div>
-                  {literatureObjectiveLens && (
-                    <div className="max-w-xl rounded-2xl border border-white/80 bg-white/80 px-3 py-2 text-xs leading-5 text-slate-700 shadow-sm">
-                      <span className="font-semibold text-slate-900">Lens:</span> {literatureObjectiveLens}
-                    </div>
-                  )}
-                </div>
-
-                {literatureProcessingSummary ? (
-                  <div className="mt-3 rounded-2xl border border-white/80 bg-white/75 px-3 py-2 text-sm leading-6 text-slate-700">
-                    {literatureProcessingSummary}
-                  </div>
-                ) : null}
               </div>
             )}
           </div>
@@ -853,6 +827,15 @@ export function ResearchWorkTemplateSection({
                           className={classNames(cardButtonClass(), 'disabled:cursor-not-allowed disabled:opacity-50')}
                         >
                           {preparingPdfFindingId === activeFinding.id ? 'Generating annotations...' : 'Review paper'}
+                        </button>
+                      )}
+                      {onBuildPaperOntology && (
+                        <button
+                          onClick={() => onBuildPaperOntology(activeFinding)}
+                          disabled={buildingPaperOntologyId === activeFinding.id}
+                          className={classNames(cardButtonClass('primary'), 'disabled:cursor-not-allowed disabled:opacity-50')}
+                        >
+                          {buildingPaperOntologyId === activeFinding.id ? 'Building ontology...' : 'Build ontology'}
                         </button>
                       )}
                       <button onClick={() => removeLiteratureFinding(activeFinding.id)} className={cardButtonClass()}>

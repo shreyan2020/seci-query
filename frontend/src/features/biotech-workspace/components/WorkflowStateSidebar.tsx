@@ -9,7 +9,6 @@ interface WorkflowStateSidebarProps {
   researchWorkTemplate: ResearchWorkTemplate;
   literatureReviewStage: 'review' | 'summary' | 'proposal' | 'draft';
   agenticPlan: AgenticPlan | null;
-  workspaceStatusMessage: string;
   onEditQuestion: () => void;
   onChangeCollaborator: () => void;
   onChangeObjective: () => void;
@@ -66,7 +65,6 @@ export function WorkflowStateSidebar({
   researchWorkTemplate,
   literatureReviewStage,
   agenticPlan,
-  workspaceStatusMessage,
   onEditQuestion,
   onChangeCollaborator,
   onChangeObjective,
@@ -80,7 +78,6 @@ export function WorkflowStateSidebar({
       <div className="border-b border-slate-200 p-4">
         <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Project Console</div>
         <div className="mt-2 text-lg font-semibold text-slate-950">{selectedProject.name}</div>
-        <div className="mt-2 text-xs leading-5 text-slate-500">{workspaceStatusMessage}</div>
       </div>
 
       <SidebarRow
@@ -163,7 +160,6 @@ export function WorkflowStateSidebar({
       <SidebarRow
         label="Draft"
         value={agenticPlan?.plan_title || 'No generated draft yet'}
-        detail={agenticPlan ? `${agenticPlan.steps.length} editable steps` : undefined}
         actionLabel="Open"
         onAction={onOpenDraft}
         active={Boolean(agenticPlan)}

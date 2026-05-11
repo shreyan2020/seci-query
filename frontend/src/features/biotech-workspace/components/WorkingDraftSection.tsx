@@ -11,7 +11,6 @@ import { classNames, getModeVisualKey } from '@/features/biotech-workspace/lib/u
 interface WorkingDraftSectionProps {
   selectedObjective: ObjectiveCluster | null;
   currentModeTitle: string;
-  currentModeDescription: string;
   onChooseAnotherObjective: () => void;
   researchWorkTemplate: ResearchWorkTemplate;
   onResearchWorkTemplateChange: (next: ResearchWorkTemplate) => void;
@@ -21,12 +20,13 @@ interface WorkingDraftSectionProps {
   synthesizingGaps: boolean;
   onRunValidationTrack: (findingId: string, trackId: string) => void;
   runningValidationId?: string | null;
-  literatureToolStatus?: string | null;
   literatureObjectiveLens?: string | null;
   literatureProcessingSummary?: string | null;
   literatureElicitationQuestions?: string[];
   onPreparePaperPdf?: (finding: ResearchFinding) => void;
+  onBuildPaperOntology?: (finding: ResearchFinding) => void;
   preparingPdfFindingId?: string | null;
+  buildingPaperOntologyId?: string | null;
   pdfAnnotationStatus?: string | null;
   literatureReviewStage: 'review' | 'summary' | 'proposal' | 'draft';
   onCompleteLiteratureReview: (summary: string) => void;
@@ -42,7 +42,6 @@ interface WorkingDraftSectionProps {
 export function WorkingDraftSection({
   selectedObjective,
   currentModeTitle,
-  currentModeDescription,
   onChooseAnotherObjective,
   researchWorkTemplate,
   onResearchWorkTemplateChange,
@@ -52,12 +51,13 @@ export function WorkingDraftSection({
   synthesizingGaps,
   onRunValidationTrack,
   runningValidationId,
-  literatureToolStatus,
   literatureObjectiveLens,
   literatureProcessingSummary,
   literatureElicitationQuestions,
   onPreparePaperPdf,
+  onBuildPaperOntology,
   preparingPdfFindingId,
+  buildingPaperOntologyId,
   pdfAnnotationStatus,
   literatureReviewStage,
   onCompleteLiteratureReview,
@@ -115,7 +115,6 @@ export function WorkingDraftSection({
             <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">
               {selectedObjective ? currentModeTitle : 'Select a mode to open the workspace'}
             </div>
-            {selectedObjective && <div className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">{currentModeDescription}</div>}
           </div>
 
           {selectedObjective && (
@@ -147,12 +146,13 @@ export function WorkingDraftSection({
               synthesizingGaps={synthesizingGaps}
               onRunValidationTrack={onRunValidationTrack}
               runningValidationId={runningValidationId}
-              literatureToolStatus={literatureToolStatus}
               literatureObjectiveLens={literatureObjectiveLens}
               literatureProcessingSummary={literatureProcessingSummary}
               literatureElicitationQuestions={literatureElicitationQuestions}
               onPreparePaperPdf={onPreparePaperPdf}
+              onBuildPaperOntology={onBuildPaperOntology}
               preparingPdfFindingId={preparingPdfFindingId}
+              buildingPaperOntologyId={buildingPaperOntologyId}
               pdfAnnotationStatus={pdfAnnotationStatus}
               reviewStage={literatureReviewStage}
               onCompleteReview={onCompleteLiteratureReview}

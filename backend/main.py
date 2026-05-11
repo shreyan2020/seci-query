@@ -51,6 +51,7 @@ from models import (
     SynthesizeLiteratureGapsRequest, SynthesizeLiteratureGapsResponse, ResearchGap,
     PreparePaperPdfRequest, PreparePaperPdfResponse, PaperAnnotation,
     TacitMemoryItem, WorkspaceMemory, WorkspaceMemoryRequest, WorkspaceMemoryResponse,
+    BuildOntologyPreviewRequest, BuildPaperOntologyRequest, OntologyPreviewResponse, OntologyReviewRequest,
     RunValidationTrackRequest, RunValidationTrackResponse,
 )
 from ollama_client import ollama
@@ -84,6 +85,7 @@ from persona_templates import list_persona_templates, get_persona_template
 from project_workflows import build_project_personas
 from agent_execution import run_agentic_execution, to_execution_response
 from research_tools import annotate_pdf_for_objective, download_open_access_pdf, extract_paper_ids, search_literature
+from ontology_service import build_ontology_preview, build_paper_ontology, ontology_response_from_graph
 
 app = FastAPI(title="SECI Query Explorer API", version="1.0.0")
 
@@ -1842,6 +1844,139 @@ async def get_project(project_id: int):
     return _project_row_to_response(row)
 
 
+@app.post("/api/projects/{project_id}/ontology/preview", response_model=OntologyPreviewResponse)
+async def preview_project_ontology(project_id: int, request: BuildOntologyPreviewRequest):
+    row = db.get_project(project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return build_ontology_preview(project_id, request)
+
+
+@app.get("/api/projects/{project_id}/ontology", response_model=OntologyPreviewResponse)
+async def get_project_ontology(project_id: int):
+    row = db.get_project(project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    graph = db.get_project_ontology(project_id)
+    return ontology_response_from_graph(
+        project_id,
+        graph.get("nodes") or [],
+        graph.get("edges") or [],
+        persisted=True,
+        last_synced_at=graph.get("last_synced_at"),
+    )
+
+
+@app.post("/api/projects/{project_id}/ontology/sync", response_model=OntologyPreviewResponse)
+async def sync_project_ontology(project_id: int, request: BuildOntologyPreviewRequest):
+    row = db.get_project(project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    preview = build_ontology_preview(project_id, request)
+    graph = db.upsert_project_ontology(
+        project_id,
+        [node.model_dump() for node in preview.nodes],
+        [edge.model_dump() for edge in preview.edges],
+        sync_source="workbench",
+        input_summary=preview.summary,
+    )
+    await log_event_safe(
+        "ontology_synced",
+        {
+            "project_id": project_id,
+            "nodes": len(preview.nodes),
+            "edges": len(preview.edges),
+            "persona_id": request.persona_id,
+            "query": request.query,
+        },
+    )
+    return ontology_response_from_graph(
+        project_id,
+        graph.get("nodes") or [],
+        graph.get("edges") or [],
+        persisted=True,
+        last_synced_at=graph.get("last_synced_at"),
+        sync_message=f"Synced {len(preview.nodes)} candidate entities and {len(preview.edges)} candidate relations from the workbench.",
+    )
+
+
+@app.patch("/api/projects/{project_id}/ontology/review", response_model=OntologyPreviewResponse)
+async def review_project_ontology_item(project_id: int, request: OntologyReviewRequest):
+    row = db.get_project(project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    updated = db.update_ontology_status(
+        project_id,
+        target_type=request.target_type,
+        target_id=request.target_id,
+        status=request.status,
+        reviewer_note=request.reviewer_note,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Ontology item not found")
+    graph = db.get_project_ontology(project_id)
+    await log_event_safe(
+        "ontology_item_reviewed",
+        {
+            "project_id": project_id,
+            "target_type": request.target_type,
+            "target_id": request.target_id,
+            "status": request.status,
+        },
+    )
+    return ontology_response_from_graph(
+        project_id,
+        graph.get("nodes") or [],
+        graph.get("edges") or [],
+        persisted=True,
+        last_synced_at=graph.get("last_synced_at"),
+        sync_message="Ontology review state saved.",
+    )
+
+
+@app.post("/api/projects/{project_id}/literature/ontology", response_model=OntologyPreviewResponse)
+async def build_project_paper_ontology(project_id: int, request: BuildPaperOntologyRequest):
+    row = db.get_project(project_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if request.persona_id:
+        persona = db.get_persona(request.persona_id)
+        if not persona:
+            raise HTTPException(status_code=404, detail="Persona not found")
+        if not _persona_belongs_to_project(persona, row):
+            raise HTTPException(status_code=400, detail="Selected persona does not belong to this project")
+
+    preview = build_paper_ontology(project_id, request)
+    if request.persist:
+        graph = db.upsert_project_ontology(
+            project_id,
+            [node.model_dump() for node in preview.nodes],
+            [edge.model_dump() for edge in preview.edges],
+            sync_source="paper_ontology",
+            input_summary=preview.summary,
+        )
+        await log_event_safe(
+            "paper_ontology_built",
+            {
+                "project_id": project_id,
+                "persona_id": request.persona_id,
+                "finding_id": request.finding.id,
+                "citation": request.finding.citation,
+                "nodes": len(preview.nodes),
+                "edges": len(preview.edges),
+            },
+        )
+        return ontology_response_from_graph(
+            project_id,
+            graph.get("nodes") or [],
+            graph.get("edges") or [],
+            persisted=True,
+            last_synced_at=graph.get("last_synced_at"),
+            sync_message=f"Built and synced a paper ontology with {len(preview.nodes)} entities and {len(preview.edges)} relationships.",
+        )
+    return preview
+
+
 @app.post("/api/projects/{project_id}/collaborators", response_model=CreateProjectCollaboratorResponse)
 async def create_project_collaborator(project_id: int, request: CreateProjectCollaboratorRequest):
     project = db.get_project(project_id)
@@ -2228,6 +2363,26 @@ Return JSON:
     return fallback
 
 
+def _ontology_search_context(project_id: int) -> str:
+    graph = db.get_project_ontology(project_id)
+    nodes = graph.get("nodes") or []
+    edges = graph.get("edges") or []
+    if not nodes and not edges:
+        return ""
+    response = ontology_response_from_graph(project_id, nodes, edges, persisted=True, last_synced_at=graph.get("last_synced_at"))
+    augmentation = response.query_augmentation
+    parts = []
+    if augmentation.expanded_terms:
+        parts.append(f"Ontology expansion terms: {', '.join(augmentation.expanded_terms[:18])}")
+    if augmentation.reasoning_lenses:
+        parts.append(f"Ontology reasoning lenses: {', '.join(augmentation.reasoning_lenses[:10])}")
+    if augmentation.tacit_context:
+        parts.append(f"Confirmed/inferred tacit context: {'; '.join(augmentation.tacit_context[:6])}")
+    if augmentation.search_routing:
+        parts.append(f"Ontology search routing: {', '.join(augmentation.search_routing)}")
+    return "\n".join(parts)
+
+
 @app.post("/api/projects/{project_id}/literature", response_model=FetchProjectLiteratureResponse)
 async def fetch_project_literature(project_id: int, request: FetchProjectLiteratureRequest):
     project = db.get_project(project_id)
@@ -2245,6 +2400,7 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
         raise HTTPException(status_code=400, detail="Literature query is required")
 
     max_results = max(1, min(int(request.max_results or 5), 8))
+    ontology_context = _ontology_search_context(project_id)
     try:
         result = await search_literature(
             query,
@@ -2260,6 +2416,7 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
                 " ".join(f"{question}: {answer}" for question, answer in (request.objective_answers or {}).items() if str(answer).strip()),
                 " ".join(f"{question}: {answer}" for question, answer in (request.global_question_answers or {}).items() if str(answer).strip()),
                 request.reasoning_notes or "",
+                ontology_context,
                 _work_template_to_prompt_text(request.work_template),
                 str(project.get("end_product") or ""),
                 str(project.get("target_host") or ""),
@@ -2301,6 +2458,7 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
                 "source_counts": result.get("source_counts") or {},
                 "result_count": len(records),
                 "new_findings": len(findings),
+                "ontology_context_used": bool(ontology_context),
                 "has_processing_summary": bool(processing.get("processing_summary")),
             },
         )

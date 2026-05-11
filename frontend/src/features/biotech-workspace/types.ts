@@ -290,6 +290,45 @@ export interface InferWorkspaceMemoryResponse {
   handoff_summary: string;
 }
 
+export interface OntologyNode {
+  id: string;
+  type: string;
+  label: string;
+  description: string;
+  source_refs: string[];
+  attributes: Record<string, unknown>;
+  confidence: number;
+  status: 'inferred' | 'confirmed' | 'rejected' | 'edited';
+}
+
+export interface OntologyEdge {
+  id: string;
+  source: string;
+  target: string;
+  relation: string;
+  evidence: string[];
+  confidence: number;
+  status: 'inferred' | 'confirmed' | 'rejected' | 'edited';
+}
+
+export interface OntologyQueryAugmentation {
+  expanded_terms: string[];
+  filters: Record<string, string[]>;
+  reasoning_lenses: string[];
+  tacit_context: string[];
+  search_routing: string[];
+}
+
+export interface OntologyPreviewResponse {
+  project_id: number;
+  summary: string;
+  nodes: OntologyNode[];
+  edges: OntologyEdge[];
+  query_augmentation: OntologyQueryAugmentation;
+  persisted: boolean;
+  sync_message: string;
+}
+
 export interface ProjectWorkspaceState {
   project_id: number;
   persona_id: number;

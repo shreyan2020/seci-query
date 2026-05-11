@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { ModeBackdrop } from '@/features/biotech-workspace/components/ModeBackdrop';
 import { ObjectiveClusteringSection } from '@/features/biotech-workspace/components/ObjectiveClusteringSection';
+import { OntologyPanel } from '@/features/biotech-workspace/components/OntologyPanel';
 import { ProjectLandingShell } from '@/features/biotech-workspace/components/ProjectLandingShell';
 import { ProjectOverview } from '@/features/biotech-workspace/components/ProjectOverview';
 import { QueryAlignmentSection } from '@/features/biotech-workspace/components/QueryAlignmentSection';
@@ -14,6 +15,7 @@ import { WorkflowStateSidebar } from '@/features/biotech-workspace/components/Wo
 import { WorkspaceHeader } from '@/features/biotech-workspace/components/WorkspaceHeader';
 import {
   API_BASE,
+  buildPaperOntology,
   clusterObjectives,
   createProject,
   createProjectCollaborator,
@@ -21,6 +23,7 @@ import {
   deleteProject,
   fetchExecutionRun,
   fetchLatestExecutionRun,
+  fetchStoredOntology,
   logProjectEvent,
   fetchProjectLiterature,
   fetchProjectQueries,
@@ -30,10 +33,12 @@ import {
   generateProjectPlan,
   inferWorkspaceMemory,
   preparePaperPdf,
+  reviewProjectOntologyItem,
   runValidationTrack,
   saveWorkspaceMemory,
   saveWorkspaceState,
   startExecutionRun,
+  syncProjectOntology,
   synthesizeLiteratureGaps,
   updateProjectQuery,
 } from '@/features/biotech-workspace/lib/api';
@@ -50,6 +55,7 @@ import type {
   AgenticPlan,
   JudgmentCall,
   ObjectiveCluster,
+  OntologyPreviewResponse,
   PlanStep,
   ProjectExecutionEvent,
   ProjectExecutionRun,
@@ -176,13 +182,13 @@ export default function BiotechProjectWorkspace() {
   const [fetchingLiterature, setFetchingLiterature] = useState(false);
   const [synthesizingGaps, setSynthesizingGaps] = useState(false);
   const [runningValidationId, setRunningValidationId] = useState<string | null>(null);
-  const [literatureToolStatus, setLiteratureToolStatus] = useState<string | null>(null);
   const [literatureObjectiveLens, setLiteratureObjectiveLens] = useState<string | null>(null);
   const [literatureProcessingSummary, setLiteratureProcessingSummary] = useState<string | null>(null);
   const [literatureElicitationQuestions, setLiteratureElicitationQuestions] = useState<string[]>([]);
   const [literatureElicitationAnswers, setLiteratureElicitationAnswers] = useState<Record<string, string>>({});
   const [literatureReviewStage, setLiteratureReviewStage] = useState<LiteratureReviewStage>('review');
   const [preparingPdfFindingId, setPreparingPdfFindingId] = useState<string | null>(null);
+  const [buildingPaperOntologyId, setBuildingPaperOntologyId] = useState<string | null>(null);
   const [pdfAnnotationStatus, setPdfAnnotationStatus] = useState<string | null>(null);
   const [pdfViewer, setPdfViewer] = useState<PdfViewerState>(null);
   const [memoryDrawerOpen, setMemoryDrawerOpen] = useState(false);
@@ -200,12 +206,13 @@ export default function BiotechProjectWorkspace() {
   const [collaboratorPickerCollapsed, setCollaboratorPickerCollapsed] = useState(false);
   const [objectivePickerCollapsed, setObjectivePickerCollapsed] = useState(false);
   const [workspaceReadyForSave, setWorkspaceReadyForSave] = useState(false);
-  const [workspaceSaveState, setWorkspaceSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [workspaceUpdatedAt, setWorkspaceUpdatedAt] = useState<string | null>(null);
   const [tacitState, setTacitState] = useState<TacitMemoryItem[]>([]);
   const [handoffSummary, setHandoffSummary] = useState('');
   const [memoryStatus, setMemoryStatus] = useState('not saved yet');
   const [inferringMemory, setInferringMemory] = useState(false);
+  const [ontologyPreview, setOntologyPreview] = useState<OntologyPreviewResponse | null>(null);
+  const [ontologyStatus, setOntologyStatus] = useState('not mapped yet');
+  const [loadingOntology, setLoadingOntology] = useState(false);
   const [status, setStatus] = useState<StatusState | null>(null);
   const querySectionRef = useRef<HTMLDivElement | null>(null);
   const objectiveSectionRef = useRef<HTMLDivElement | null>(null);
@@ -235,9 +242,6 @@ export default function BiotechProjectWorkspace() {
     : '';
   const activeObjectiveFrame = selectedObjective ? inferObjectiveFrame(selectedObjectiveLens) : null;
   const currentModeTitle = selectedObjective ? selectedObjective.title : 'Neutral workspace';
-  const currentModeDescription = selectedObjective
-    ? selectedObjective.definition
-    : 'Choose an objective mode after aligning the query with a collaborator. The selected mode becomes the active workspace setting.';
   const modeVisualKey = selectedObjective ? getModeVisualKey(selectedObjective.title) : 'general';
   const rankedPersonas = selectedProject
     ? [...selectedProject.personas]
@@ -350,15 +354,6 @@ export default function BiotechProjectWorkspace() {
     reasoningNotes,
     handoffSummary,
   ]);
-  const workspaceStatusMessage = loadingWorkspace
-    ? 'Loading saved workspace...'
-    : workspaceSaveState === 'saving'
-      ? 'Saving workspace...'
-      : workspaceSaveState === 'saved'
-        ? `Workspace saved${workspaceUpdatedAt ? ` at ${new Date(workspaceUpdatedAt).toLocaleString()}` : ''}.`
-        : workspaceSaveState === 'error'
-          ? 'Workspace save failed. Changes stay local until the next successful save.'
-          : 'Workspace changes are kept per project persona.';
   const modeStudioTone: Record<string, string> = {
     general: 'border-slate-200/90 bg-white/78',
     evidence: 'border-sky-200/80 bg-[linear-gradient(135deg,rgba(239,246,255,0.78),rgba(255,255,255,0.74))]',
@@ -398,7 +393,6 @@ export default function BiotechProjectWorkspace() {
     setResearchWorkTemplate(createEmptyResearchWorkTemplate(nextQuery));
     setAgenticPlan(null);
     setSelectedPlanStepId('');
-    setLiteratureToolStatus(null);
     setLiteratureObjectiveLens(null);
     setLiteratureProcessingSummary(null);
     setLiteratureElicitationQuestions([]);
@@ -423,7 +417,6 @@ export default function BiotechProjectWorkspace() {
     research_work_template: researchWorkTemplate,
     agentic_plan: agenticPlan,
     selected_plan_step_id: selectedPlanStepId,
-    literature_tool_status: literatureToolStatus,
     literature_objective_lens: literatureObjectiveLens,
     literature_processing_summary: literatureProcessingSummary,
     literature_elicitation_questions: literatureElicitationQuestions,
@@ -447,7 +440,6 @@ export default function BiotechProjectWorkspace() {
     setResearchWorkTemplate((state.research_work_template as ResearchWorkTemplate) || createEmptyResearchWorkTemplate(query.query));
     setAgenticPlan((state.agentic_plan as AgenticPlan | null) || null);
     setSelectedPlanStepId(typeof state.selected_plan_step_id === 'string' ? state.selected_plan_step_id : '');
-    setLiteratureToolStatus(typeof state.literature_tool_status === 'string' ? state.literature_tool_status : null);
     setLiteratureObjectiveLens(typeof state.literature_objective_lens === 'string' ? state.literature_objective_lens : null);
     setLiteratureProcessingSummary(typeof state.literature_processing_summary === 'string' ? state.literature_processing_summary : null);
     setLiteratureElicitationQuestions((state.literature_elicitation_questions as string[]) || []);
@@ -581,7 +573,6 @@ export default function BiotechProjectWorkspace() {
     JSON.stringify(researchWorkTemplate),
     JSON.stringify(agenticPlan),
     selectedPlanStepId,
-    literatureToolStatus,
     literatureObjectiveLens,
     literatureProcessingSummary,
     JSON.stringify(literatureElicitationQuestions),
@@ -626,13 +617,10 @@ export default function BiotechProjectWorkspace() {
     setClarifyingAnswers({});
     setReasoningNotes('');
     setResearchWorkTemplate(createEmptyResearchWorkTemplate());
-    setWorkspaceUpdatedAt(null);
     setWorkspaceReadyForSave(false);
-    setWorkspaceSaveState('idle');
     setObjectivePickerCollapsed(false);
     setExecutionRun(null);
     setExecutionEvents([]);
-    setLiteratureToolStatus(null);
     setLiteratureObjectiveLens(null);
     setLiteratureProcessingSummary(null);
     setLiteratureElicitationQuestions([]);
@@ -665,8 +653,6 @@ export default function BiotechProjectWorkspace() {
           setResearchWorkTemplate(response.state.work_template || createEmptyResearchWorkTemplate(nextFocusQuestion));
           setAgenticPlan(response.state.plan || null);
           setSelectedPlanStepId(response.state.selected_step_id || response.state.plan?.steps[0]?.id || '');
-          setWorkspaceUpdatedAt(response.state.updated_at || null);
-          setWorkspaceSaveState('saved');
         } else {
           const nextFocusQuestion = defaultFocusQuestion(selectedProject, selectedPersona);
           setFocusQuestion(nextFocusQuestion);
@@ -675,8 +661,6 @@ export default function BiotechProjectWorkspace() {
           setResearchWorkTemplate(createEmptyResearchWorkTemplate(nextFocusQuestion));
           setAgenticPlan(null);
           setSelectedPlanStepId('');
-          setWorkspaceUpdatedAt(null);
-          setWorkspaceSaveState('idle');
         }
       } catch (error) {
         if (cancelled) return;
@@ -687,8 +671,6 @@ export default function BiotechProjectWorkspace() {
         setResearchWorkTemplate(createEmptyResearchWorkTemplate(nextFocusQuestion));
         setAgenticPlan(null);
         setSelectedPlanStepId('');
-        setWorkspaceUpdatedAt(null);
-        setWorkspaceSaveState('error');
         setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to load saved workspace' });
       } finally {
         if (!cancelled) {
@@ -736,9 +718,8 @@ export default function BiotechProjectWorkspace() {
     }
 
     const timer = window.setTimeout(async () => {
-      setWorkspaceSaveState('saving');
       try {
-        const response = await saveWorkspaceState(selectedProject.id, Number(selectedPersonaId), {
+        await saveWorkspaceState(selectedProject.id, Number(selectedPersonaId), {
           focus_question: focusQuestion,
           clarifying_answers: clarifyingAnswers,
           reasoning_notes: reasoningNotes,
@@ -746,10 +727,8 @@ export default function BiotechProjectWorkspace() {
           plan: agenticPlan,
           selected_step_id: selectedPlanStepId || undefined,
         });
-        setWorkspaceUpdatedAt(response.state?.updated_at || new Date().toISOString());
-        setWorkspaceSaveState('saved');
       } catch {
-        setWorkspaceSaveState('error');
+        // Autosave retries on the next workspace change.
       }
     }, 900);
 
@@ -831,6 +810,35 @@ export default function BiotechProjectWorkspace() {
     JSON.stringify(tacitState),
     handoffSummary,
   ]);
+
+  useEffect(() => {
+    if (!memoryDrawerOpen || !selectedProject || selectedPersonaId === '') {
+      return;
+    }
+    let cancelled = false;
+    const loadOntology = async () => {
+      setLoadingOntology(true);
+      setOntologyStatus('loading stored ontology...');
+      try {
+        const response = await fetchStoredOntology(selectedProject.id);
+        if (cancelled) return;
+        setOntologyPreview(response);
+        setOntologyStatus(response.nodes.length > 0 ? `loaded ${response.nodes.length} entities and ${response.edges.length} relations` : 'no stored ontology yet');
+      } catch (error) {
+        if (!cancelled) {
+          setOntologyStatus(error instanceof Error ? error.message : 'ontology load failed');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingOntology(false);
+        }
+      }
+    };
+    loadOntology().catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [memoryDrawerOpen, selectedProject?.id, selectedPersonaId]);
 
   useEffect(() => {
     if (!selectedProject || !executionRun || !['queued', 'running'].includes(executionRun.status)) {
@@ -1197,9 +1205,27 @@ export default function BiotechProjectWorkspace() {
       setAgenticPlan(response.plan);
       setSelectedPlanStepId(response.plan.steps[0]?.id || '');
       setLiteratureReviewStage('draft');
-      setWorkspaceSaveState('saved');
       setActiveFlowStep('workspace');
       scrollToSection(draftSectionRef);
+      syncProjectOntology(selectedProject.id, {
+        persona_id: Number(selectedPersonaId),
+        query: focusQuestion || researchWorkTemplate.initial_query || selectedProject.project_goal,
+        objective_id: selectedObjective.id,
+        objective_title: selectedObjective.title,
+        objective_definition: selectedObjective.definition,
+        project_goal: selectedProject.project_goal,
+        project_end_product: selectedProject.end_product,
+        project_target_host: selectedProject.target_host,
+        explicit_state: explicitWorkspaceState,
+        tacit_state: tacitState,
+        work_template: researchWorkTemplate,
+        plan: response.plan,
+      })
+        .then((ontology) => {
+          setOntologyPreview(ontology);
+          setOntologyStatus(ontology.sync_message || `synced ${ontology.nodes.length} ontology entities`);
+        })
+        .catch(() => {});
       setStatus({ type: 'success', message: `${activeObjectiveFrame?.draftLabel || 'Working Draft'} generated and workspace saved.` });
     } catch (error) {
       setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to generate project draft' });
@@ -1220,7 +1246,6 @@ export default function BiotechProjectWorkspace() {
     }
 
     setFetchingLiterature(true);
-    setLiteratureToolStatus('Calling multi-source literature search...');
     setStatus({ type: 'info', message: 'Fetching literature with PubMed, Semantic Scholar, OpenAlex, and Crossref...' });
     try {
       const response = await fetchProjectLiterature(selectedProject.id, {
@@ -1246,19 +1271,18 @@ export default function BiotechProjectWorkspace() {
       const newFindings = (response.findings || [])
         .filter((item) => !existing.has(item.citation.trim().toLowerCase()))
         .map((item, index) => ({ ...item, id: uniqueFindingId(item, existingIds, index) }));
-      setResearchWorkTemplate((current) => ({
-        ...current,
-        initial_query: current.initial_query.trim() || queryText,
-        literature_findings: [...current.literature_findings, ...newFindings],
-      }));
+      const nextWorkTemplate = {
+        ...researchWorkTemplate,
+        initial_query: researchWorkTemplate.initial_query.trim() || queryText,
+        literature_findings: [...researchWorkTemplate.literature_findings, ...newFindings],
+      };
+      setResearchWorkTemplate(nextWorkTemplate);
       setLiteratureObjectiveLens(response.objective_lens || selectedObjective?.title || null);
       setLiteratureProcessingSummary(response.processing_summary || null);
       setLiteratureElicitationQuestions(response.elicitation_questions || []);
       setLiteratureElicitationAnswers({});
       setLiteratureReviewStage('review');
       const trace = response.tool_trace;
-      const traceMessage = `${trace.tool_name} returned ${trace.result_count} result${trace.result_count === 1 ? '' : 's'} for "${trace.query}". Added ${newFindings.length}.`;
-      setLiteratureToolStatus(traceMessage);
       logProjectEvent('project_literature_fetched', {
         project_id: selectedProject.id,
         query_id: activeQueryId === '' ? undefined : activeQueryId,
@@ -1269,10 +1293,30 @@ export default function BiotechProjectWorkspace() {
         result_count: trace.result_count,
         added_count: newFindings.length,
       }).catch(() => {});
-      setStatus({ type: 'success', message: traceMessage });
+      if (newFindings.length > 0) {
+        syncProjectOntology(selectedProject.id, {
+          persona_id: Number(selectedPersonaId),
+          query: queryText,
+          objective_id: selectedObjective?.id,
+          objective_title: selectedObjective?.title,
+          objective_definition: selectedObjective?.definition,
+          project_goal: selectedProject.project_goal,
+          project_end_product: selectedProject.end_product,
+          project_target_host: selectedProject.target_host,
+          explicit_state: explicitWorkspaceState,
+          tacit_state: tacitState,
+          work_template: nextWorkTemplate,
+          plan: agenticPlan,
+        })
+          .then((ontology) => {
+            setOntologyPreview(ontology);
+            setOntologyStatus(ontology.sync_message || `synced ${ontology.nodes.length} ontology entities`);
+          })
+          .catch(() => {});
+      }
+      setStatus({ type: 'success', message: `Literature library updated. Added ${newFindings.length} new source${newFindings.length === 1 ? '' : 's'}.` });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to fetch literature';
-      setLiteratureToolStatus(message);
       setStatus({ type: 'error', message });
     } finally {
       setFetchingLiterature(false);
@@ -1368,6 +1412,50 @@ export default function BiotechProjectWorkspace() {
       setStatus({ type: 'error', message });
     } finally {
       setPreparingPdfFindingId(null);
+    }
+  };
+
+  const handleBuildPaperOntology = async (finding: ResearchFinding) => {
+    if (!selectedProject || !selectedPersona || selectedPersonaId === '') {
+      setStatus({ type: 'error', message: 'Select a project persona before building a paper ontology.' });
+      return;
+    }
+    const queryText = researchWorkTemplate.initial_query.trim() || focusQuestion.trim() || selectedProject.project_goal.trim();
+    setBuildingPaperOntologyId(finding.id);
+    setOntologyStatus('building paper ontology...');
+    setStatus({ type: 'info', message: 'Building a paper-scoped ontology and syncing it into the project graph...' });
+    try {
+      const response = await buildPaperOntology(selectedProject.id, {
+        persona_id: Number(selectedPersonaId),
+        finding,
+        query: queryText,
+        objective_id: selectedObjective?.id,
+        objective_title: selectedObjective?.title,
+        objective_definition: selectedObjective?.definition,
+        project_goal: selectedProject.project_goal,
+        project_end_product: selectedProject.end_product,
+        project_target_host: selectedProject.target_host,
+        persist: true,
+      });
+      setOntologyPreview(response);
+      setOntologyStatus(response.sync_message || `built paper ontology with ${response.nodes.length} entities`);
+      logProjectEvent('paper_ontology_requested', {
+        project_id: selectedProject.id,
+        query_id: activeQueryId === '' ? undefined : activeQueryId,
+        persona_id: Number(selectedPersonaId),
+        objective_id: selectedObjective?.id,
+        finding_id: finding.id,
+        citation: finding.citation,
+        node_count: response.nodes.length,
+        edge_count: response.edges.length,
+      }).catch(() => {});
+      setStatus({ type: 'success', message: response.sync_message || 'Paper ontology synced into the project graph.' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to build paper ontology';
+      setOntologyStatus(message);
+      setStatus({ type: 'error', message });
+    } finally {
+      setBuildingPaperOntologyId(null);
     }
   };
 
@@ -1564,11 +1652,79 @@ export default function BiotechProjectWorkspace() {
       setTacitState(response.tacit_state || []);
       setHandoffSummary(response.handoff_summary || '');
       setMemoryStatus('tacit state inferred; saving...');
+      syncProjectOntology(selectedProject.id, {
+        persona_id: Number(selectedPersonaId),
+        query: focusQuestion || researchWorkTemplate.initial_query || selectedProject.project_goal,
+        objective_id: selectedObjective?.id,
+        objective_title: selectedObjective?.title,
+        objective_definition: selectedObjective?.definition,
+        project_goal: selectedProject.project_goal,
+        project_end_product: selectedProject.end_product,
+        project_target_host: selectedProject.target_host,
+        explicit_state: explicitWorkspaceState,
+        tacit_state: response.tacit_state || [],
+        work_template: researchWorkTemplate,
+        plan: agenticPlan,
+      })
+        .then((ontology) => {
+          setOntologyPreview(ontology);
+          setOntologyStatus(ontology.sync_message || `synced ${ontology.nodes.length} ontology entities`);
+        })
+        .catch(() => {});
       setStatus({ type: 'success', message: 'Tacit memory inferred. Review, confirm, edit, or reject each item.' });
     } catch (error) {
       setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to infer workspace memory' });
     } finally {
       setInferringMemory(false);
+    }
+  };
+
+  const handleRefreshOntology = async () => {
+    if (!selectedProject || selectedPersonaId === '') {
+      setOntologyStatus('select a project and collaborator first');
+      return;
+    }
+    setLoadingOntology(true);
+    setOntologyStatus('syncing workbench context into ontology...');
+    try {
+      const response = await syncProjectOntology(selectedProject.id, {
+        persona_id: Number(selectedPersonaId),
+        query: focusQuestion || researchWorkTemplate.initial_query || selectedProject.project_goal,
+        objective_id: selectedObjective?.id,
+        objective_title: selectedObjective?.title,
+        objective_definition: selectedObjective?.definition,
+        project_goal: selectedProject.project_goal,
+        project_end_product: selectedProject.end_product,
+        project_target_host: selectedProject.target_host,
+        explicit_state: explicitWorkspaceState,
+        tacit_state: tacitState,
+        work_template: researchWorkTemplate,
+        plan: agenticPlan,
+      });
+      setOntologyPreview(response);
+      setOntologyStatus(response.sync_message || `synced ${response.nodes.length} entities and ${response.edges.length} relations`);
+    } catch (error) {
+      setOntologyStatus(error instanceof Error ? error.message : 'ontology sync failed');
+    } finally {
+      setLoadingOntology(false);
+    }
+  };
+
+  const handleReviewOntologyNode = async (nodeId: string, nextStatus: 'confirmed' | 'rejected') => {
+    if (!selectedProject) {
+      return;
+    }
+    setOntologyStatus('saving ontology review...');
+    try {
+      const response = await reviewProjectOntologyItem(selectedProject.id, {
+        target_type: 'node',
+        target_id: nodeId,
+        status: nextStatus,
+      });
+      setOntologyPreview(response);
+      setOntologyStatus(response.sync_message || `ontology node ${nextStatus}`);
+    } catch (error) {
+      setOntologyStatus(error instanceof Error ? error.message : 'ontology review failed');
     }
   };
 
@@ -1711,7 +1867,6 @@ export default function BiotechProjectWorkspace() {
               researchWorkTemplate={researchWorkTemplate}
               literatureReviewStage={literatureReviewStage}
               agenticPlan={agenticPlan}
-              workspaceStatusMessage={workspaceStatusMessage}
               onEditQuestion={handleRefineQuery}
               onChangeCollaborator={handleChooseAnotherCollaborator}
               onChangeObjective={handleChooseAnotherObjective}
@@ -1860,7 +2015,6 @@ export default function BiotechProjectWorkspace() {
                   <WorkingDraftSection
                     selectedObjective={selectedObjective}
                     currentModeTitle={currentModeTitle}
-                    currentModeDescription={currentModeDescription}
                     onChooseAnotherObjective={handleChooseAnotherObjective}
                     researchWorkTemplate={researchWorkTemplate}
                     onResearchWorkTemplateChange={setResearchWorkTemplate}
@@ -1870,12 +2024,13 @@ export default function BiotechProjectWorkspace() {
                     synthesizingGaps={synthesizingGaps}
                     onRunValidationTrack={handleRunValidationTrack}
                     runningValidationId={runningValidationId}
-                    literatureToolStatus={literatureToolStatus}
                     literatureObjectiveLens={literatureObjectiveLens}
                     literatureProcessingSummary={literatureProcessingSummary}
                     literatureElicitationQuestions={literatureElicitationQuestions}
                     onPreparePaperPdf={handlePreparePaperPdf}
+                    onBuildPaperOntology={handleBuildPaperOntology}
                     preparingPdfFindingId={preparingPdfFindingId}
+                    buildingPaperOntologyId={buildingPaperOntologyId}
                     pdfAnnotationStatus={pdfAnnotationStatus}
                     literatureReviewStage={literatureReviewStage}
                     onCompleteLiteratureReview={handleCompleteLiteratureReview}
@@ -2126,15 +2281,24 @@ export default function BiotechProjectWorkspace() {
             </div>
 
             {selectedPersona ? (
-              <WorkspaceMemoryPanel
-                workspaceKey={workspaceMemoryKey}
-                memoryStatus={memoryStatus}
-                tacitState={tacitState}
-                handoffSummary={handoffSummary}
-                inferring={inferringMemory}
-                onInfer={handleInferWorkspaceMemory}
-                onUpdateTacitItem={updateTacitItem}
-              />
+              <div className="space-y-4">
+                <OntologyPanel
+                  preview={ontologyPreview}
+                  loading={loadingOntology}
+                  status={ontologyStatus}
+                  onRefresh={handleRefreshOntology}
+                  onReviewNode={handleReviewOntologyNode}
+                />
+                <WorkspaceMemoryPanel
+                  workspaceKey={workspaceMemoryKey}
+                  memoryStatus={memoryStatus}
+                  tacitState={tacitState}
+                  handoffSummary={handoffSummary}
+                  inferring={inferringMemory}
+                  onInfer={handleInferWorkspaceMemory}
+                  onUpdateTacitItem={updateTacitItem}
+                />
+              </div>
             ) : (
               <div className="rounded-2xl border border-dashed border-amber-300 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
                 Select a collaborator before inferring tacit memory. The digest above can still be used as an explicit project summary.

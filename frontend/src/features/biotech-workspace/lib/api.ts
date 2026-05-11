@@ -5,6 +5,7 @@ import type {
   GeneratePlanResponse,
   InferWorkspaceMemoryResponse,
   ObjectiveClustersResponse,
+  OntologyPreviewResponse,
   PreparePaperPdfResponse,
   ProjectExecutionRunResponse,
   ProjectFormState,
@@ -337,6 +338,118 @@ export async function inferWorkspaceMemory(payload: {
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
     throw new Error(err.detail || 'Failed to infer workspace memory');
+  }
+  return response.json();
+}
+
+export async function fetchOntologyPreview(
+  projectId: number,
+  payload: {
+    persona_id?: number;
+    query?: string;
+    objective_id?: string;
+    objective_title?: string;
+    objective_definition?: string;
+    project_goal?: string;
+    project_end_product?: string;
+    project_target_host?: string;
+    explicit_state?: Record<string, unknown>;
+    tacit_state?: TacitMemoryItem[];
+    work_template?: ResearchWorkTemplate | null;
+    plan?: GeneratePlanResponse['plan'] | null;
+  }
+): Promise<OntologyPreviewResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/ontology/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to build ontology preview');
+  }
+  return response.json();
+}
+
+export async function fetchStoredOntology(projectId: number): Promise<OntologyPreviewResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/ontology`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to load project ontology');
+  return response.json();
+}
+
+export async function syncProjectOntology(
+  projectId: number,
+  payload: {
+    persona_id?: number;
+    query?: string;
+    objective_id?: string;
+    objective_title?: string;
+    objective_definition?: string;
+    project_goal?: string;
+    project_end_product?: string;
+    project_target_host?: string;
+    explicit_state?: Record<string, unknown>;
+    tacit_state?: TacitMemoryItem[];
+    work_template?: ResearchWorkTemplate | null;
+    plan?: GeneratePlanResponse['plan'] | null;
+  }
+): Promise<OntologyPreviewResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/ontology/sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to sync project ontology');
+  }
+  return response.json();
+}
+
+export async function reviewProjectOntologyItem(
+  projectId: number,
+  payload: {
+    target_type: 'node' | 'edge';
+    target_id: string;
+    status: 'inferred' | 'confirmed' | 'rejected' | 'edited';
+    reviewer_note?: string;
+  }
+): Promise<OntologyPreviewResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/ontology/review`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update ontology review state');
+  }
+  return response.json();
+}
+
+export async function buildPaperOntology(
+  projectId: number,
+  payload: {
+    persona_id?: number;
+    finding: ResearchFinding;
+    query?: string;
+    objective_id?: string;
+    objective_title?: string;
+    objective_definition?: string;
+    project_goal?: string;
+    project_end_product?: string;
+    project_target_host?: string;
+    persist?: boolean;
+  }
+): Promise<OntologyPreviewResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/literature/ontology`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to build paper ontology');
   }
   return response.json();
 }

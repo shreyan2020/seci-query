@@ -143,6 +143,80 @@ class InferWorkspaceMemoryResponse(BaseModel):
     handoff_summary: str = ""
 
 
+class OntologyNode(BaseModel):
+    id: str
+    type: str
+    label: str
+    description: str = ""
+    source_refs: List[str] = Field(default_factory=list)
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 0.7
+    status: Literal["inferred", "confirmed", "rejected", "edited"] = "inferred"
+
+
+class OntologyEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    relation: str
+    evidence: List[str] = Field(default_factory=list)
+    confidence: float = 0.7
+    status: Literal["inferred", "confirmed", "rejected", "edited"] = "inferred"
+
+
+class OntologyQueryAugmentation(BaseModel):
+    expanded_terms: List[str] = Field(default_factory=list)
+    filters: Dict[str, List[str]] = Field(default_factory=dict)
+    reasoning_lenses: List[str] = Field(default_factory=list)
+    tacit_context: List[str] = Field(default_factory=list)
+    search_routing: List[str] = Field(default_factory=list)
+
+
+class BuildOntologyPreviewRequest(BaseModel):
+    persona_id: Optional[int] = None
+    query: Optional[str] = None
+    objective_id: Optional[str] = None
+    objective_title: Optional[str] = None
+    objective_definition: Optional[str] = None
+    project_goal: Optional[str] = None
+    project_end_product: Optional[str] = None
+    project_target_host: Optional[str] = None
+    explicit_state: Dict[str, Any] = Field(default_factory=dict)
+    tacit_state: List[TacitMemoryItem] = Field(default_factory=list)
+    work_template: Optional["ResearchWorkTemplate"] = None
+    plan: Optional[AgenticPlan] = None
+
+
+class BuildPaperOntologyRequest(BaseModel):
+    persona_id: Optional[int] = None
+    finding: "ResearchFinding"
+    query: Optional[str] = None
+    objective_id: Optional[str] = None
+    objective_title: Optional[str] = None
+    objective_definition: Optional[str] = None
+    project_goal: Optional[str] = None
+    project_end_product: Optional[str] = None
+    project_target_host: Optional[str] = None
+    persist: bool = True
+
+
+class OntologyPreviewResponse(BaseModel):
+    project_id: int
+    summary: str = ""
+    nodes: List[OntologyNode] = Field(default_factory=list)
+    edges: List[OntologyEdge] = Field(default_factory=list)
+    query_augmentation: OntologyQueryAugmentation = Field(default_factory=OntologyQueryAugmentation)
+    persisted: bool = False
+    sync_message: str = ""
+
+
+class OntologyReviewRequest(BaseModel):
+    target_type: Literal["node", "edge"]
+    target_id: str
+    status: Literal["inferred", "confirmed", "rejected", "edited"]
+    reviewer_note: Optional[str] = None
+
+
 class FeedbackRequest(BaseModel):
     persona_id: Optional[int] = None
     objective_id: Optional[str] = None

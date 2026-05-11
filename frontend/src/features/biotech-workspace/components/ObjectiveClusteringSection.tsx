@@ -166,7 +166,6 @@ export function ObjectiveClusteringSection({
               <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Selected Objective Mode</div>
               <div className="mt-2 text-lg font-semibold text-slate-950">{selectedObjective.title}</div>
               <div className="mt-1 text-sm text-slate-700">{selectedObjective.subtitle}</div>
-              <div className="mt-3 text-sm leading-6 text-slate-600">{selectedObjective.definition}</div>
             </div>
             <button
               onClick={() => onSetObjectivePickerCollapsed(false)}
@@ -175,15 +174,6 @@ export function ObjectiveClusteringSection({
               Choose another objective
             </button>
           </div>
-          {selectedObjective.signals.length > 0 && (
-            <div className="mt-4 flex flex-wrap gap-2">
-              {selectedObjective.signals.slice(0, 6).map((signal) => (
-                <span key={signal} className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-700">
-                  {signal}
-                </span>
-              ))}
-            </div>
-          )}
         </div>
       ) : (
         <div className="mt-5 space-y-5">
@@ -211,16 +201,6 @@ export function ObjectiveClusteringSection({
                     {active && <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-900">Active</span>}
                   </div>
                   <div className="mt-2 text-sm text-slate-700">{objective.subtitle}</div>
-                  <div className="mt-3 text-sm text-slate-600">{objective.definition}</div>
-                  {objective.signals.length > 0 && (
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {objective.signals.slice(0, 6).map((signal) => (
-                        <span key={signal} className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
-                          {signal}
-                        </span>
-                      ))}
-                    </div>
-                  )}
                 </button>
               );
             })}
@@ -232,14 +212,6 @@ export function ObjectiveClusteringSection({
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Active Mode</div>
                 <div className="mt-2 text-lg font-semibold text-slate-950">{selectedObjective.title}</div>
                 <div className="mt-1 text-sm text-slate-700">{selectedObjective.subtitle}</div>
-                <div className="mt-3 text-sm leading-6 text-slate-700">{selectedObjective.definition}</div>
-                <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-                  The next section is now framed by this mode. Continue downward to the workspace and start iterating inside that setting.
-                </div>
-                <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Exemplar Answer Shape</div>
-                  <div className="mt-2 text-sm text-slate-700">{selectedObjective.exemplar_answer}</div>
-                </div>
               </div>
 
               <div className="space-y-4">

@@ -12,7 +12,23 @@ interface WorkspaceHeaderProps {
   status: StatusState | null;
 }
 
+function compactStatus(status: StatusState | null) {
+  if (!status) return null;
+  const message = status.message || '';
+  if (/search_literature returned/i.test(message)) {
+    return { ...status, message: 'Literature library updated.' };
+  }
+  if (/Fetching literature with/i.test(message)) {
+    return { ...status, message: 'Searching literature...' };
+  }
+  if (/Fetched \d+ new literature/i.test(message)) {
+    return { ...status, message: 'Literature evidence refreshed.' };
+  }
+  return status;
+}
+
 export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemory, journeyHref, memoryItemCount = 0, status }: WorkspaceHeaderProps) {
+  const visibleStatus = compactStatus(status);
   return (
     <section className="rounded-none border border-emerald-200/70 bg-white/90 p-6 shadow-[0_24px_70px_-45px_rgba(15,23,42,0.45)] backdrop-blur">
       <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
@@ -65,16 +81,16 @@ export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemo
         </div>
       </div>
 
-      {status && (
+      {visibleStatus && (
         <div
           className={classNames(
             'mt-5 rounded-2xl border px-4 py-3 text-sm',
-            status.type === 'success' && 'border-emerald-200 bg-emerald-50 text-emerald-900',
-            status.type === 'error' && 'border-rose-200 bg-rose-50 text-rose-900',
-            status.type === 'info' && 'border-sky-200 bg-sky-50 text-sky-900'
+            visibleStatus.type === 'success' && 'border-emerald-200 bg-emerald-50 text-emerald-900',
+            visibleStatus.type === 'error' && 'border-rose-200 bg-rose-50 text-rose-900',
+            visibleStatus.type === 'info' && 'border-sky-200 bg-sky-50 text-sky-900'
           )}
         >
-          {status.message}
+          {visibleStatus.message}
         </div>
       )}
     </section>
