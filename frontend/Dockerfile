@@ -24,6 +24,9 @@ ENV NEXT_PUBLIC_API_PORT=${NEXT_PUBLIC_API_PORT}
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# The cloud build context may omit frontend/public when no tracked assets are present.
+RUN mkdir -p public
+
 # Build the application (Next.js will inline NEXT_PUBLIC_API_URL into the client bundle)
 RUN npm run build
 
