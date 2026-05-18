@@ -1,19 +1,29 @@
 import type {
   CreateProjectResponse,
+  CreateProjectCollaboratorResponse,
   FetchProjectLiteratureResponse,
   GeneratePlanResponse,
   InferWorkspaceMemoryResponse,
   ObjectiveClustersResponse,
+  OntologyPreviewResponse,
+  PreparePaperPdfResponse,
   ProjectExecutionRunResponse,
   ProjectFormState,
+  ProjectJourneyResponse,
+  ProjectQuerySession,
+  ProjectQuerySessionListResponse,
+  ResearchFinding,
   ResearchWorkTemplate,
+  SynthesizeLiteratureGapsResponse,
+  ValidationTrack,
   ProjectsResponse,
   TacitMemoryItem,
   ProjectWorkspaceResponse,
   WorkspaceMemoryResponse,
 } from '@/features/biotech-workspace/types';
+import { API_BASE } from './api-base';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+export { API_BASE };
 
 export async function fetchProjects(): Promise<ProjectsResponse> {
   const response = await fetch(`${API_BASE}/api/projects`, { cache: 'no-store' });
@@ -125,6 +135,169 @@ export async function fetchProjectLiterature(
   return response.json();
 }
 
+export async function synthesizeLiteratureGaps(
+  projectId: number,
+  payload: {
+    persona_id: number;
+    query: string;
+    project_goal?: string;
+    project_end_product?: string;
+    project_target_host?: string;
+    objective_id?: string;
+    objective_title?: string;
+    objective_definition?: string;
+    objective_signals?: string[];
+    work_template: ResearchWorkTemplate;
+    max_gaps?: number;
+  }
+): Promise<SynthesizeLiteratureGapsResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/literature/gaps`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to synthesize literature gaps');
+  }
+  return response.json();
+}
+
+export async function runValidationTrack(
+  projectId: number,
+  payload: {
+    persona_id: number;
+    track: ValidationTrack;
+    query?: string;
+    project_goal?: string;
+    objective_title?: string;
+  }
+): Promise<{ status: 'success' | 'unsupported' | 'error'; message: string; result: Record<string, unknown> }> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/validation/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to run validation');
+  }
+  return response.json();
+}
+
+export async function createProjectCollaborator(
+  projectId: number,
+  payload: {
+    name: string;
+    role?: string;
+    workflow_stage?: string;
+    focus_area?: string;
+    goals?: string[];
+    workflow_focus?: string[];
+    starter_questions?: string[];
+    summary?: string;
+  }
+): Promise<CreateProjectCollaboratorResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/collaborators`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create project collaborator');
+  }
+  return response.json();
+}
+
+export async function fetchProjectQueries(projectId: number): Promise<ProjectQuerySessionListResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/queries`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to load project queries');
+  return response.json();
+}
+
+export async function fetchProjectJourney(projectId: number): Promise<ProjectJourneyResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/journey`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to load project journey');
+  return response.json();
+}
+
+export async function logProjectEvent(event_type: string, payload: Record<string, unknown>): Promise<{ status: string }> {
+  const response = await fetch(`${API_BASE}/log_event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event_type, payload }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to log project event');
+  }
+  return response.json();
+}
+
+export async function createProjectQuery(
+  projectId: number,
+  payload: { title?: string; query: string; state?: Record<string, unknown> }
+): Promise<ProjectQuerySession> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/queries`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create project query');
+  }
+  return response.json();
+}
+
+export async function updateProjectQuery(
+  projectId: number,
+  queryId: number,
+  payload: { title?: string; query?: string; state?: Record<string, unknown> }
+): Promise<ProjectQuerySession> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/queries/${queryId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to save project query');
+  }
+  return response.json();
+}
+
+export async function preparePaperPdf(
+  projectId: number,
+  payload: {
+    persona_id: number;
+    finding: ResearchFinding;
+    query: string;
+    project_goal?: string;
+    project_end_product?: string;
+    project_target_host?: string;
+    persona_name?: string;
+    persona_focus?: string;
+    objective_id?: string;
+    objective_title?: string;
+    objective_definition?: string;
+    objective_signals?: string[];
+    max_annotations?: number;
+  }
+): Promise<PreparePaperPdfResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/literature/pdf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to prepare annotated PDF');
+  }
+  return response.json();
+}
+
 export async function fetchWorkspaceMemory(workspaceKey: string): Promise<WorkspaceMemoryResponse> {
   const response = await fetch(`${API_BASE}/api/workspace-memory/${encodeURIComponent(workspaceKey)}`, { cache: 'no-store' });
   if (!response.ok) throw new Error('Failed to load workspace memory');
@@ -166,6 +339,136 @@ export async function inferWorkspaceMemory(payload: {
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
     throw new Error(err.detail || 'Failed to infer workspace memory');
+  }
+  return response.json();
+}
+
+export function diagnosticsExportUrl(payload: { project_id?: number; include_pdfs?: boolean } = {}): string {
+  const params = new URLSearchParams();
+  if (payload.project_id) params.set('project_id', String(payload.project_id));
+  if (payload.include_pdfs !== undefined) params.set('include_pdfs', String(payload.include_pdfs));
+  const query = params.toString();
+  return `${API_BASE}/api/diagnostics/export${query ? `?${query}` : ''}`;
+}
+
+export async function exportDiagnostics(payload: { project_id?: number; include_pdfs?: boolean } = {}): Promise<Blob> {
+  const url = diagnosticsExportUrl(payload);
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to export diagnostics');
+  }
+  return response.blob();
+}
+
+export async function fetchOntologyPreview(
+  projectId: number,
+  payload: {
+    persona_id?: number;
+    query?: string;
+    objective_id?: string;
+    objective_title?: string;
+    objective_definition?: string;
+    project_goal?: string;
+    project_end_product?: string;
+    project_target_host?: string;
+    explicit_state?: Record<string, unknown>;
+    tacit_state?: TacitMemoryItem[];
+    work_template?: ResearchWorkTemplate | null;
+    plan?: GeneratePlanResponse['plan'] | null;
+  }
+): Promise<OntologyPreviewResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/ontology/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to build ontology preview');
+  }
+  return response.json();
+}
+
+export async function fetchStoredOntology(projectId: number): Promise<OntologyPreviewResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/ontology`, { cache: 'no-store' });
+  if (!response.ok) throw new Error('Failed to load project ontology');
+  return response.json();
+}
+
+export async function syncProjectOntology(
+  projectId: number,
+  payload: {
+    persona_id?: number;
+    query?: string;
+    objective_id?: string;
+    objective_title?: string;
+    objective_definition?: string;
+    project_goal?: string;
+    project_end_product?: string;
+    project_target_host?: string;
+    explicit_state?: Record<string, unknown>;
+    tacit_state?: TacitMemoryItem[];
+    work_template?: ResearchWorkTemplate | null;
+    plan?: GeneratePlanResponse['plan'] | null;
+  }
+): Promise<OntologyPreviewResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/ontology/sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to sync project ontology');
+  }
+  return response.json();
+}
+
+export async function reviewProjectOntologyItem(
+  projectId: number,
+  payload: {
+    target_type: 'node' | 'edge';
+    target_id: string;
+    status: 'inferred' | 'confirmed' | 'rejected' | 'edited';
+    reviewer_note?: string;
+  }
+): Promise<OntologyPreviewResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/ontology/review`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update ontology review state');
+  }
+  return response.json();
+}
+
+export async function buildPaperOntology(
+  projectId: number,
+  payload: {
+    persona_id?: number;
+    finding: ResearchFinding;
+    query?: string;
+    objective_id?: string;
+    objective_title?: string;
+    objective_definition?: string;
+    project_goal?: string;
+    project_end_product?: string;
+    project_target_host?: string;
+    persist?: boolean;
+  }
+): Promise<OntologyPreviewResponse> {
+  const response = await fetch(`${API_BASE}/api/projects/${projectId}/literature/ontology`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to build paper ontology');
   }
   return response.json();
 }

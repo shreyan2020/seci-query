@@ -1,4 +1,4 @@
-import type { AgenticPlan, ObjectiveCluster, Project, ProjectPersona } from '@/features/biotech-workspace/types';
+import type { AgenticPlan, ObjectiveCluster, Project, ProjectPersona, ResearchWorkTemplate } from '@/features/biotech-workspace/types';
 import { classNames, humanize, stageTone } from '@/features/biotech-workspace/lib/utils';
 
 interface WorkflowStateSidebarProps {
@@ -6,11 +6,15 @@ interface WorkflowStateSidebarProps {
   focusQuestion: string;
   selectedPersona: ProjectPersona | null;
   selectedObjective: ObjectiveCluster | null;
+  researchWorkTemplate: ResearchWorkTemplate;
+  literatureReviewStage: 'review' | 'summary' | 'proposal' | 'draft';
   agenticPlan: AgenticPlan | null;
-  workspaceStatusMessage: string;
   onEditQuestion: () => void;
   onChangeCollaborator: () => void;
   onChangeObjective: () => void;
+  onOpenLiteratureReview: () => void;
+  onOpenLiteratureSummary: () => void;
+  onOpenProposalSynthesis: () => void;
   onOpenDraft: () => void;
 }
 
@@ -21,6 +25,7 @@ function SidebarRow({
   actionLabel,
   onAction,
   active,
+  current = false,
 }: {
   label: string;
   value: string;
@@ -28,12 +33,16 @@ function SidebarRow({
   actionLabel: string;
   onAction: () => void;
   active: boolean;
+  current?: boolean;
 }) {
   return (
-    <div className={classNames('border-t border-slate-200 px-4 py-4', active ? 'bg-white' : 'bg-slate-50/70')}>
+    <div className={classNames('border-t border-slate-200 px-4 py-4', current ? 'bg-emerald-50/70' : active ? 'bg-white' : 'bg-slate-50/70')}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">{label}</div>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">
+            {label}
+            {current ? <span className="ml-2 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[9px] text-emerald-800">Current</span> : null}
+          </div>
           <div className="mt-1 line-clamp-2 text-sm font-semibold leading-5 text-slate-950">{value}</div>
         </div>
         <button
@@ -53,19 +62,22 @@ export function WorkflowStateSidebar({
   focusQuestion,
   selectedPersona,
   selectedObjective,
+  researchWorkTemplate,
+  literatureReviewStage,
   agenticPlan,
-  workspaceStatusMessage,
   onEditQuestion,
   onChangeCollaborator,
   onChangeObjective,
+  onOpenLiteratureReview,
+  onOpenLiteratureSummary,
+  onOpenProposalSynthesis,
   onOpenDraft,
 }: WorkflowStateSidebarProps) {
   return (
-    <aside className="rounded-[1.25rem] border border-slate-200 bg-white/90 shadow-sm backdrop-blur xl:sticky xl:top-6 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto">
-      <div className="p-4">
-        <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Workspace State</div>
+    <aside className="rounded-none border border-slate-200 bg-white/95 shadow-[18px_0_70px_-55px_rgba(15,23,42,0.65)] backdrop-blur xl:sticky xl:top-3 xl:max-h-[calc(100vh-1.5rem)] xl:overflow-y-auto">
+      <div className="border-b border-slate-200 p-4">
+        <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Project Console</div>
         <div className="mt-2 text-lg font-semibold text-slate-950">{selectedProject.name}</div>
-        <div className="mt-2 text-xs leading-5 text-slate-500">{workspaceStatusMessage}</div>
       </div>
 
       <SidebarRow
@@ -111,12 +123,47 @@ export function WorkflowStateSidebar({
       />
 
       <SidebarRow
+        label="Literature Sources"
+        value={`${researchWorkTemplate.literature_findings.length} source${researchWorkTemplate.literature_findings.length === 1 ? '' : 's'} reviewed`}
+        actionLabel="Open"
+        onAction={onOpenLiteratureReview}
+        active={researchWorkTemplate.literature_findings.length > 0}
+        current={literatureReviewStage === 'review'}
+      />
+
+      <SidebarRow
+        label="Literature Summary"
+        value={
+          researchWorkTemplate.synthesis_memo
+            ? 'Final summary reviewed'
+            : 'No final summary yet'
+        }
+        detail={
+          researchWorkTemplate.synthesis_memo ||
+          'Not finalized yet.'
+        }
+        actionLabel="Open"
+        onAction={onOpenLiteratureSummary}
+        active={Boolean(researchWorkTemplate.synthesis_memo)}
+        current={literatureReviewStage === 'summary'}
+      />
+
+      <SidebarRow
+        label="Proposal Synthesis"
+        value={researchWorkTemplate.proposal_candidates.length > 0 ? `${researchWorkTemplate.proposal_candidates.length} proposal seed${researchWorkTemplate.proposal_candidates.length === 1 ? '' : 's'}` : 'Ready after summary'}
+        actionLabel="Open"
+        onAction={onOpenProposalSynthesis}
+        active={Boolean(researchWorkTemplate.synthesis_memo)}
+        current={literatureReviewStage === 'proposal'}
+      />
+
+      <SidebarRow
         label="Draft"
         value={agenticPlan?.plan_title || 'No generated draft yet'}
-        detail={agenticPlan ? `${agenticPlan.steps.length} editable steps` : 'Generate a draft after selecting an objective mode.'}
         actionLabel="Open"
         onAction={onOpenDraft}
         active={Boolean(agenticPlan)}
+        current={literatureReviewStage === 'draft'}
       />
     </aside>
   );

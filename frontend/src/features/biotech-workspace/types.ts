@@ -13,6 +13,10 @@ export interface PlanStep {
   evidence_facts: string[];
   examples: string[];
   dependencies: string[];
+  source_refs: string[];
+  gap_refs: string[];
+  judgment_refs: string[];
+  validation_refs: string[];
   expected_outcome: string;
   confidence: number;
 }
@@ -82,6 +86,75 @@ export interface CreateProjectResponse {
   created_persona_ids: number[];
 }
 
+export interface CreateProjectCollaboratorResponse {
+  project: Project;
+  persona: ProjectPersona;
+}
+
+export interface ProjectQuerySession {
+  id: number;
+  project_id: number;
+  title: string;
+  query: string;
+  state: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectQuerySessionListResponse {
+  queries: ProjectQuerySession[];
+}
+
+export interface ProjectJourneyEvent {
+  id: number;
+  event_type: string;
+  title: string;
+  detail: string;
+  timestamp: string;
+  query_id?: number | null;
+  persona_id?: number | null;
+  objective_id?: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface ProjectJourneyPath {
+  id: string;
+  query_id: number;
+  query_title: string;
+  query: string;
+  selected_persona_id?: number | null;
+  selected_persona_name?: string | null;
+  selected_objective_id?: string | null;
+  selected_objective_title?: string | null;
+  active_flow_step?: string | null;
+  updated_at: string;
+  literature_count: number;
+  judgment_count: number;
+  gap_count: number;
+  proposal_count: number;
+  plan_step_count: number;
+  summary: string;
+  next_action_hint: string;
+  recent_events: ProjectJourneyEvent[];
+}
+
+export interface ProjectJourneySummary {
+  total_queries: number;
+  explored_collaborators: number;
+  explored_objectives: number;
+  literature_findings: number;
+  judgment_calls: number;
+  proposal_candidates: number;
+  event_count: number;
+}
+
+export interface ProjectJourneyResponse {
+  project: Project;
+  summary: ProjectJourneySummary;
+  paths: ProjectJourneyPath[];
+  events: ProjectJourneyEvent[];
+}
+
 export interface ResearchFinding {
   id: string;
   citation: string;
@@ -89,6 +162,13 @@ export interface ResearchFinding {
   knowns: string[];
   unknowns: string[];
   relevance: string;
+  source_ids?: Record<string, string>;
+  annotation_insights?: string[];
+  generated_questions?: string[];
+  annotations?: PaperAnnotation[];
+  judgment_calls?: JudgmentCall[];
+  validation_tracks?: ValidationTrack[];
+  synthesis_memo?: string;
 }
 
 export interface ResearchGap {
@@ -97,6 +177,16 @@ export interface ResearchGap {
   supporting_signals: string[];
   next_question: string;
   priority_note: string;
+}
+
+export interface CrossPaperSynthesis {
+  summary: string;
+  evidence_matrix: Record<string, unknown>[];
+  consensus_patterns: string[];
+  contradictions_or_tensions: string[];
+  transferability_assumptions: string[];
+  gap_rationale: string[];
+  validation_priorities: string[];
 }
 
 export interface JudgmentCall {
@@ -112,6 +202,7 @@ export interface ValidationTrack {
   method: string;
   questions: string[];
   success_signal: string;
+  execution_result?: Record<string, unknown>;
 }
 
 export interface ProposalCandidate {
@@ -120,6 +211,10 @@ export interface ProposalCandidate {
   why_now: string;
   experiment_outline: string;
   readouts: string[];
+  source_refs?: string[];
+  gap_refs?: string[];
+  judgment_refs?: string[];
+  validation_refs?: string[];
 }
 
 export interface ResearchWorkTemplate {
@@ -148,6 +243,47 @@ export interface FetchProjectLiteratureResponse {
   elicitation_questions: string[];
 }
 
+export interface SynthesizeLiteratureGapsResponse {
+  gaps: ResearchGap[];
+  synthesis_summary: string;
+  cross_paper_synthesis: CrossPaperSynthesis;
+}
+
+export interface PaperAnnotation {
+  page: number;
+  snippet: string;
+  reason: string;
+  matched_terms: string[];
+  score: number;
+}
+
+export interface PaperStructuredNotes {
+  evidence_claims: string[];
+  methods: string[];
+  quantitative_benchmarks: string[];
+  limitations: string[];
+  transferability_notes: string[];
+  research_gaps: string[];
+}
+
+export interface PreparePaperPdfResponse {
+  status: 'success' | 'not_open_access' | 'error';
+  message: string;
+  paper_id?: string | null;
+  pmid?: string | null;
+  pmcid?: string | null;
+  source_pdf_url?: string | null;
+  original_pdf_path?: string | null;
+  annotated_pdf_path?: string | null;
+  annotated_pdf_url?: string | null;
+  annotations: PaperAnnotation[];
+  insights: string[];
+  passage_insights: string[];
+  structured_notes: PaperStructuredNotes;
+  research_questions: string[];
+  visual_annotations: boolean;
+}
+
 export interface TacitMemoryItem {
   id: string;
   label: string;
@@ -156,6 +292,16 @@ export interface TacitMemoryItem {
   confidence: number;
   status: 'inferred' | 'confirmed' | 'rejected' | 'edited';
   reviewer_note?: string | null;
+}
+
+export interface TacitElicitationQuestion {
+  id: string;
+  category: 'transferability' | 'feasibility' | 'constraints' | 'evidence_trust' | 'validation' | 'handoff';
+  question: string;
+  why_it_matters: string;
+  evidence_refs: string[];
+  suggested_owner?: string | null;
+  priority: 'low' | 'medium' | 'high';
 }
 
 export interface WorkspaceMemory {
@@ -173,7 +319,47 @@ export interface WorkspaceMemoryResponse {
 
 export interface InferWorkspaceMemoryResponse {
   tacit_state: TacitMemoryItem[];
+  elicitation_questions: TacitElicitationQuestion[];
   handoff_summary: string;
+}
+
+export interface OntologyNode {
+  id: string;
+  type: string;
+  label: string;
+  description: string;
+  source_refs: string[];
+  attributes: Record<string, unknown>;
+  confidence: number;
+  status: 'inferred' | 'confirmed' | 'rejected' | 'edited';
+}
+
+export interface OntologyEdge {
+  id: string;
+  source: string;
+  target: string;
+  relation: string;
+  evidence: string[];
+  confidence: number;
+  status: 'inferred' | 'confirmed' | 'rejected' | 'edited';
+}
+
+export interface OntologyQueryAugmentation {
+  expanded_terms: string[];
+  filters: Record<string, string[]>;
+  reasoning_lenses: string[];
+  tacit_context: string[];
+  search_routing: string[];
+}
+
+export interface OntologyPreviewResponse {
+  project_id: number;
+  summary: string;
+  nodes: OntologyNode[];
+  edges: OntologyEdge[];
+  query_augmentation: OntologyQueryAugmentation;
+  persisted: boolean;
+  sync_message: string;
 }
 
 export interface ProjectWorkspaceState {

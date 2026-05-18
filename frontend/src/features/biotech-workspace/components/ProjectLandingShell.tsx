@@ -32,7 +32,7 @@ export function ProjectLandingShell({
   return (
     <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
       <aside className="space-y-5">
-        <section className="rounded-[1.75rem] border border-slate-200 bg-white/90 p-5 shadow-sm backdrop-blur">
+        <section className="rounded-none border border-slate-200 bg-white/90 p-5 shadow-sm backdrop-blur">
           <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Create Project</div>
           <div className="mt-4 space-y-3">
             <div>
@@ -108,7 +108,7 @@ export function ProjectLandingShell({
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-200 bg-white/90 p-5 shadow-sm backdrop-blur">
+        <section className="rounded-none border border-slate-200 bg-white/90 p-5 shadow-sm backdrop-blur">
           <div className="flex items-center justify-between">
             <div>
               <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Program Library</div>

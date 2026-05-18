@@ -15,8 +15,10 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Allow passing the public API URL at build-time so Next.js can inline it
-ARG NEXT_PUBLIC_API_URL
-ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+ARG NEXT_PUBLIC_API_URL=""
+ARG NEXT_PUBLIC_API_PORT=8000
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_API_PORT=${NEXT_PUBLIC_API_PORT}
 
 # Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
@@ -54,9 +56,11 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 # Declare build arg in the runtime stage so the ENV substitution doesn't reference an undefined variable
-ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_API_URL=""
+ARG NEXT_PUBLIC_API_PORT=8000
 # Ensure runtime also has NEXT_PUBLIC_API_URL available (keeps runner consistent with build)
-ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://backend:8000}
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_API_PORT=${NEXT_PUBLIC_API_PORT}
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \

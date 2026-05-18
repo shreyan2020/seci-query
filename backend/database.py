@@ -176,6 +176,19 @@ class DatabaseManager:
         ''')
 
         cursor.execute('''
+            CREATE TABLE IF NOT EXISTS project_query_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                query TEXT NOT NULL DEFAULT '',
+                state_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            )
+        ''')
+
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS project_execution_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER NOT NULL,
@@ -221,6 +234,56 @@ class DatabaseManager:
                 handoff_summary TEXT NOT NULL DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ontology_nodes (
+                project_id INTEGER NOT NULL,
+                node_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                label TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                source_refs_json TEXT NOT NULL DEFAULT '[]',
+                attributes_json TEXT NOT NULL DEFAULT '{}',
+                confidence REAL NOT NULL DEFAULT 0.7,
+                status TEXT NOT NULL DEFAULT 'inferred',
+                generated_by TEXT NOT NULL DEFAULT 'system',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (project_id, node_id),
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ontology_edges (
+                project_id INTEGER NOT NULL,
+                edge_id TEXT NOT NULL,
+                source_node_id TEXT NOT NULL,
+                target_node_id TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '[]',
+                confidence REAL NOT NULL DEFAULT 0.7,
+                status TEXT NOT NULL DEFAULT 'inferred',
+                generated_by TEXT NOT NULL DEFAULT 'system',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (project_id, edge_id),
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ontology_sync_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                sync_source TEXT NOT NULL DEFAULT 'workbench',
+                node_count INTEGER NOT NULL DEFAULT 0,
+                edge_count INTEGER NOT NULL DEFAULT 0,
+                input_summary TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(project_id) REFERENCES projects(id)
             )
         ''')
 
@@ -290,6 +353,11 @@ class DatabaseManager:
         ''')
 
         cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_project_query_sessions_project_updated
+            ON project_query_sessions(project_id, updated_at DESC)
+        ''')
+
+        cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_project_execution_runs_project_persona
             ON project_execution_runs(project_id, persona_id, updated_at DESC)
         ''')
@@ -307,6 +375,16 @@ class DatabaseManager:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_workspace_memory_scope_updated
             ON workspace_memory(scope, updated_at)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_ontology_nodes_project_type
+            ON ontology_nodes(project_id, type, updated_at DESC)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_ontology_edges_project_relation
+            ON ontology_edges(project_id, relation, updated_at DESC)
         ''')
         
         conn.commit()
@@ -343,6 +421,21 @@ class DatabaseManager:
         for row in rows:
             row["payload"] = json.loads(row.get("payload") or "{}")
         return rows
+
+    def list_project_events(self, project_id: int, limit: int = 1000) -> List[Dict[str, Any]]:
+        rows = self.list_events(min_id=0, limit=max(limit * 3, limit))
+        filtered: List[Dict[str, Any]] = []
+        for row in rows:
+            payload = row.get("payload") or {}
+            try:
+                payload_project_id = int(payload.get("project_id") or 0)
+            except Exception:
+                payload_project_id = 0
+            if payload_project_id == int(project_id):
+                filtered.append(row)
+            if len(filtered) >= limit:
+                break
+        return filtered
 
     def get_persona_refactor_checkpoint(self, persona_id: int) -> int:
         conn = self._connect()
@@ -514,6 +607,207 @@ class DatabaseManager:
             "handoff_summary": handoff_summary,
             "updated_at": None,
         }
+
+    def _hydrate_ontology_node(self, row: sqlite3.Row) -> Dict[str, Any]:
+        payload = dict(row)
+        payload["id"] = payload.pop("node_id")
+        payload["source_refs"] = json.loads(payload.pop("source_refs_json") or "[]")
+        payload["attributes"] = json.loads(payload.pop("attributes_json") or "{}")
+        payload.pop("project_id", None)
+        payload.pop("generated_by", None)
+        payload.pop("created_at", None)
+        payload.pop("updated_at", None)
+        return payload
+
+    def _hydrate_ontology_edge(self, row: sqlite3.Row) -> Dict[str, Any]:
+        payload = dict(row)
+        payload["id"] = payload.pop("edge_id")
+        payload["source"] = payload.pop("source_node_id")
+        payload["target"] = payload.pop("target_node_id")
+        payload["evidence"] = json.loads(payload.pop("evidence_json") or "[]")
+        payload.pop("project_id", None)
+        payload.pop("generated_by", None)
+        payload.pop("created_at", None)
+        payload.pop("updated_at", None)
+        return payload
+
+    def get_project_ontology(self, project_id: int) -> Dict[str, Any]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM ontology_nodes
+            WHERE project_id = ?
+            ORDER BY
+                CASE status WHEN 'confirmed' THEN 0 WHEN 'edited' THEN 1 WHEN 'inferred' THEN 2 ELSE 3 END,
+                updated_at DESC,
+                label ASC
+            ''',
+            (project_id,),
+        )
+        nodes = [self._hydrate_ontology_node(row) for row in cursor.fetchall()]
+        cursor.execute(
+            '''
+            SELECT * FROM ontology_edges
+            WHERE project_id = ?
+            ORDER BY
+                CASE status WHEN 'confirmed' THEN 0 WHEN 'edited' THEN 1 WHEN 'inferred' THEN 2 ELSE 3 END,
+                updated_at DESC,
+                relation ASC
+            ''',
+            (project_id,),
+        )
+        edges = [self._hydrate_ontology_edge(row) for row in cursor.fetchall()]
+        cursor.execute(
+            '''
+            SELECT created_at FROM ontology_sync_runs
+            WHERE project_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            ''',
+            (project_id,),
+        )
+        sync_row = cursor.fetchone()
+        conn.close()
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "last_synced_at": sync_row["created_at"] if sync_row else None,
+        }
+
+    def upsert_project_ontology(
+        self,
+        project_id: int,
+        nodes: List[Dict[str, Any]],
+        edges: List[Dict[str, Any]],
+        sync_source: str = "workbench",
+        input_summary: str = "",
+    ) -> Dict[str, Any]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        for node in nodes:
+            cursor.execute(
+                '''
+                INSERT INTO ontology_nodes (
+                    project_id, node_id, type, label, description, source_refs_json,
+                    attributes_json, confidence, status, generated_by, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(project_id, node_id) DO UPDATE SET
+                    type = excluded.type,
+                    label = excluded.label,
+                    description = excluded.description,
+                    source_refs_json = excluded.source_refs_json,
+                    attributes_json = excluded.attributes_json,
+                    confidence = max(ontology_nodes.confidence, excluded.confidence),
+                    status = CASE
+                        WHEN ontology_nodes.status IN ('confirmed', 'rejected', 'edited') THEN ontology_nodes.status
+                        ELSE excluded.status
+                    END,
+                    generated_by = excluded.generated_by,
+                    updated_at = CURRENT_TIMESTAMP
+                ''',
+                (
+                    project_id,
+                    node.get("id"),
+                    node.get("type") or "concept",
+                    node.get("label") or node.get("id") or "Untitled",
+                    node.get("description") or "",
+                    json.dumps(node.get("source_refs") or []),
+                    json.dumps(node.get("attributes") or {}),
+                    float(node.get("confidence") or 0.7),
+                    node.get("status") or "inferred",
+                    sync_source,
+                ),
+            )
+
+        for edge in edges:
+            cursor.execute(
+                '''
+                INSERT INTO ontology_edges (
+                    project_id, edge_id, source_node_id, target_node_id, relation,
+                    evidence_json, confidence, status, generated_by, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(project_id, edge_id) DO UPDATE SET
+                    source_node_id = excluded.source_node_id,
+                    target_node_id = excluded.target_node_id,
+                    relation = excluded.relation,
+                    evidence_json = excluded.evidence_json,
+                    confidence = max(ontology_edges.confidence, excluded.confidence),
+                    status = CASE
+                        WHEN ontology_edges.status IN ('confirmed', 'rejected', 'edited') THEN ontology_edges.status
+                        ELSE excluded.status
+                    END,
+                    generated_by = excluded.generated_by,
+                    updated_at = CURRENT_TIMESTAMP
+                ''',
+                (
+                    project_id,
+                    edge.get("id"),
+                    edge.get("source"),
+                    edge.get("target"),
+                    edge.get("relation") or "related_to",
+                    json.dumps(edge.get("evidence") or []),
+                    float(edge.get("confidence") or 0.7),
+                    edge.get("status") or "inferred",
+                    sync_source,
+                ),
+            )
+
+        cursor.execute(
+            '''
+            INSERT INTO ontology_sync_runs(project_id, sync_source, node_count, edge_count, input_summary)
+            VALUES (?, ?, ?, ?, ?)
+            ''',
+            (project_id, sync_source, len(nodes), len(edges), input_summary[:1000]),
+        )
+        conn.commit()
+        conn.close()
+        return self.get_project_ontology(project_id)
+
+    def update_ontology_status(
+        self,
+        project_id: int,
+        target_type: str,
+        target_id: str,
+        status: str,
+        reviewer_note: Optional[str] = None,
+    ) -> bool:
+        conn = self._connect()
+        cursor = conn.cursor()
+        if target_type == "node":
+            row = cursor.execute(
+                'SELECT attributes_json FROM ontology_nodes WHERE project_id = ? AND node_id = ?',
+                (project_id, target_id),
+            ).fetchone()
+            if not row:
+                conn.close()
+                return False
+            attributes = json.loads(row["attributes_json"] or "{}")
+            if reviewer_note is not None:
+                attributes["reviewer_note"] = reviewer_note
+            cursor.execute(
+                '''
+                UPDATE ontology_nodes
+                SET status = ?, attributes_json = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE project_id = ? AND node_id = ?
+                ''',
+                (status, json.dumps(attributes), project_id, target_id),
+            )
+        else:
+            cursor.execute(
+                '''
+                UPDATE ontology_edges
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE project_id = ? AND edge_id = ?
+                ''',
+                (status, project_id, target_id),
+            )
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return updated
 
     def create_report(self, title: str, qmd_path: str, objective_id: Optional[str] = None) -> int:
         conn = self._connect()
@@ -841,11 +1135,88 @@ class DatabaseManager:
             cursor.execute(f'DELETE FROM personas WHERE id IN ({placeholders})', persona_ids)
 
         cursor.execute('DELETE FROM project_workspace_state WHERE project_id = ?', (project_id,))
+        cursor.execute('DELETE FROM project_query_sessions WHERE project_id = ?', (project_id,))
+        cursor.execute('DELETE FROM ontology_edges WHERE project_id = ?', (project_id,))
+        cursor.execute('DELETE FROM ontology_nodes WHERE project_id = ?', (project_id,))
+        cursor.execute('DELETE FROM ontology_sync_runs WHERE project_id = ?', (project_id,))
         cursor.execute('DELETE FROM projects WHERE id = ?', (project_id,))
         deleted = cursor.rowcount > 0
         conn.commit()
         conn.close()
         return deleted
+
+    def list_project_query_sessions(self, project_id: int) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM project_query_sessions
+            WHERE project_id = ?
+            ORDER BY updated_at DESC, id DESC
+            ''',
+            (project_id,),
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        for row in rows:
+            row["state"] = json.loads(row.get("state_json") or "{}")
+        return rows
+
+    def get_project_query_session(self, query_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM project_query_sessions WHERE id = ?', (query_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        payload = dict(row)
+        payload["state"] = json.loads(payload.get("state_json") or "{}")
+        return payload
+
+    def create_project_query_session(self, project_id: int, title: str, query: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO project_query_sessions(project_id, title, query, state_json)
+            VALUES (?, ?, ?, ?)
+            ''',
+            (project_id, title, query, json.dumps(state or {})),
+        )
+        query_id = int(cursor.lastrowid)
+        conn.commit()
+        conn.close()
+        created = self.get_project_query_session(query_id)
+        return created or {}
+
+    def update_project_query_session(
+        self,
+        query_id: int,
+        *,
+        title: Optional[str] = None,
+        query: Optional[str] = None,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        existing = self.get_project_query_session(query_id)
+        if not existing:
+            return None
+        next_title = existing.get("title") if title is None else title
+        next_query = existing.get("query") if query is None else query
+        next_state = existing.get("state") if state is None else state
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE project_query_sessions
+            SET title = ?, query = ?, state_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ''',
+            (next_title, next_query, json.dumps(next_state or {}), query_id),
+        )
+        conn.commit()
+        conn.close()
+        return self.get_project_query_session(query_id)
 
     def get_project_workspace_state(self, project_id: int, persona_id: int) -> Optional[Dict[str, Any]]:
         conn = self._connect()

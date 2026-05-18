@@ -16,6 +16,18 @@ interface ObjectiveClusteringSectionProps {
   globalQuestionAnswers: Record<string, string>;
   onGlobalQuestionChange: (question: string, value: string) => void;
   onSetObjectivePickerCollapsed: (collapsed: boolean) => void;
+  showManualObjectiveForm: boolean;
+  manualObjective: {
+    title: string;
+    subtitle: string;
+    definition: string;
+    signals: string;
+    facet_questions: string;
+    exemplar_answer: string;
+  };
+  onToggleManualObjectiveForm: () => void;
+  onManualObjectiveChange: (field: keyof ObjectiveClusteringSectionProps['manualObjective'], value: string) => void;
+  onCreateManualObjective: () => void;
 }
 
 export function ObjectiveClusteringSection({
@@ -33,6 +45,11 @@ export function ObjectiveClusteringSection({
   globalQuestionAnswers,
   onGlobalQuestionChange,
   onSetObjectivePickerCollapsed,
+  showManualObjectiveForm,
+  manualObjective,
+  onToggleManualObjectiveForm,
+  onManualObjectiveChange,
+  onCreateManualObjective,
 }: ObjectiveClusteringSectionProps) {
   const modeCardTone = (label: string, active: boolean) => {
     const key = getModeVisualKey(label);
@@ -67,6 +84,77 @@ export function ObjectiveClusteringSection({
         </div>
       </div>
 
+      <div className="mt-5 rounded-[1.4rem] border border-dashed border-slate-300 bg-slate-50 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Manual objective mode</div>
+          </div>
+          <button
+            onClick={onToggleManualObjectiveForm}
+            className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
+          >
+            {showManualObjectiveForm ? 'Hide fields' : 'Add objective'}
+          </button>
+        </div>
+        {showManualObjectiveForm && (
+          <div className="mt-3 space-y-3">
+            <div className="grid gap-3 lg:grid-cols-2">
+              <input
+                value={manualObjective.title}
+                onChange={(event) => onManualObjectiveChange('title', event.target.value)}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                placeholder="Title, e.g. Enzyme design validation"
+              />
+              <input
+                value={manualObjective.subtitle}
+                onChange={(event) => onManualObjectiveChange('subtitle', event.target.value)}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                placeholder="Short subtitle"
+              />
+            </div>
+            <textarea
+              value={manualObjective.definition}
+              onChange={(event) => onManualObjectiveChange('definition', event.target.value)}
+              rows={3}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+              placeholder="Objective definition"
+            />
+            <div className="grid gap-3 lg:grid-cols-3">
+              <textarea
+                value={manualObjective.signals}
+                onChange={(event) => onManualObjectiveChange('signals', event.target.value)}
+                rows={3}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                placeholder="Signals, one per line"
+              />
+              <textarea
+                value={manualObjective.facet_questions}
+                onChange={(event) => onManualObjectiveChange('facet_questions', event.target.value)}
+                rows={3}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                placeholder="Refinement questions, one per line"
+              />
+              <textarea
+                value={manualObjective.exemplar_answer}
+                onChange={(event) => onManualObjectiveChange('exemplar_answer', event.target.value)}
+                rows={3}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                placeholder="Exemplar answer"
+              />
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={onCreateManualObjective}
+                disabled={!manualObjective.title.trim() || !manualObjective.definition.trim()}
+                className="rounded-2xl bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Create objective
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       {objectiveClusters.length === 0 ? (
         <div className="mt-5 rounded-[1.5rem] border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-600">
           {canGenerateModes ? 'Generate objective modes from the current query.' : 'Choose a collaborator and query first.'}
@@ -78,7 +166,6 @@ export function ObjectiveClusteringSection({
               <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Selected Objective Mode</div>
               <div className="mt-2 text-lg font-semibold text-slate-950">{selectedObjective.title}</div>
               <div className="mt-1 text-sm text-slate-700">{selectedObjective.subtitle}</div>
-              <div className="mt-3 text-sm leading-6 text-slate-600">{selectedObjective.definition}</div>
             </div>
             <button
               onClick={() => onSetObjectivePickerCollapsed(false)}
@@ -87,15 +174,6 @@ export function ObjectiveClusteringSection({
               Choose another objective
             </button>
           </div>
-          {selectedObjective.signals.length > 0 && (
-            <div className="mt-4 flex flex-wrap gap-2">
-              {selectedObjective.signals.slice(0, 6).map((signal) => (
-                <span key={signal} className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-700">
-                  {signal}
-                </span>
-              ))}
-            </div>
-          )}
         </div>
       ) : (
         <div className="mt-5 space-y-5">
@@ -123,16 +201,6 @@ export function ObjectiveClusteringSection({
                     {active && <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-900">Active</span>}
                   </div>
                   <div className="mt-2 text-sm text-slate-700">{objective.subtitle}</div>
-                  <div className="mt-3 text-sm text-slate-600">{objective.definition}</div>
-                  {objective.signals.length > 0 && (
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {objective.signals.slice(0, 6).map((signal) => (
-                        <span key={signal} className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
-                          {signal}
-                        </span>
-                      ))}
-                    </div>
-                  )}
                 </button>
               );
             })}
@@ -144,14 +212,6 @@ export function ObjectiveClusteringSection({
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Active Mode</div>
                 <div className="mt-2 text-lg font-semibold text-slate-950">{selectedObjective.title}</div>
                 <div className="mt-1 text-sm text-slate-700">{selectedObjective.subtitle}</div>
-                <div className="mt-3 text-sm leading-6 text-slate-700">{selectedObjective.definition}</div>
-                <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-                  The next section is now framed by this mode. Continue downward to the workspace and start iterating inside that setting.
-                </div>
-                <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Exemplar Answer Shape</div>
-                  <div className="mt-2 text-sm text-slate-700">{selectedObjective.exemplar_answer}</div>
-                </div>
               </div>
 
               <div className="space-y-4">

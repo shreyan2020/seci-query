@@ -67,6 +67,10 @@ class PlanStep(BaseModel):
     evidence_facts: List[str] = Field(default_factory=list)
     examples: List[str] = Field(default_factory=list)
     dependencies: List[str] = Field(default_factory=list)
+    source_refs: List[str] = Field(default_factory=list)
+    gap_refs: List[str] = Field(default_factory=list)
+    judgment_refs: List[str] = Field(default_factory=list)
+    validation_refs: List[str] = Field(default_factory=list)
     expected_outcome: str
     confidence: float = 0.5
 
@@ -107,6 +111,23 @@ class TacitMemoryItem(BaseModel):
     reviewer_note: Optional[str] = None
 
 
+class TacitElicitationQuestion(BaseModel):
+    id: str
+    category: Literal[
+        "transferability",
+        "feasibility",
+        "constraints",
+        "evidence_trust",
+        "validation",
+        "handoff",
+    ]
+    question: str
+    why_it_matters: str = ""
+    evidence_refs: List[str] = Field(default_factory=list)
+    suggested_owner: Optional[str] = None
+    priority: Literal["low", "medium", "high"] = "medium"
+
+
 class WorkspaceMemory(BaseModel):
     workspace_key: str
     scope: str = "default"
@@ -136,7 +157,82 @@ class InferWorkspaceMemoryRequest(BaseModel):
 
 class InferWorkspaceMemoryResponse(BaseModel):
     tacit_state: List[TacitMemoryItem] = Field(default_factory=list)
+    elicitation_questions: List[TacitElicitationQuestion] = Field(default_factory=list)
     handoff_summary: str = ""
+
+
+class OntologyNode(BaseModel):
+    id: str
+    type: str
+    label: str
+    description: str = ""
+    source_refs: List[str] = Field(default_factory=list)
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 0.7
+    status: Literal["inferred", "confirmed", "rejected", "edited"] = "inferred"
+
+
+class OntologyEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    relation: str
+    evidence: List[str] = Field(default_factory=list)
+    confidence: float = 0.7
+    status: Literal["inferred", "confirmed", "rejected", "edited"] = "inferred"
+
+
+class OntologyQueryAugmentation(BaseModel):
+    expanded_terms: List[str] = Field(default_factory=list)
+    filters: Dict[str, List[str]] = Field(default_factory=dict)
+    reasoning_lenses: List[str] = Field(default_factory=list)
+    tacit_context: List[str] = Field(default_factory=list)
+    search_routing: List[str] = Field(default_factory=list)
+
+
+class BuildOntologyPreviewRequest(BaseModel):
+    persona_id: Optional[int] = None
+    query: Optional[str] = None
+    objective_id: Optional[str] = None
+    objective_title: Optional[str] = None
+    objective_definition: Optional[str] = None
+    project_goal: Optional[str] = None
+    project_end_product: Optional[str] = None
+    project_target_host: Optional[str] = None
+    explicit_state: Dict[str, Any] = Field(default_factory=dict)
+    tacit_state: List[TacitMemoryItem] = Field(default_factory=list)
+    work_template: Optional["ResearchWorkTemplate"] = None
+    plan: Optional[AgenticPlan] = None
+
+
+class BuildPaperOntologyRequest(BaseModel):
+    persona_id: Optional[int] = None
+    finding: "ResearchFinding"
+    query: Optional[str] = None
+    objective_id: Optional[str] = None
+    objective_title: Optional[str] = None
+    objective_definition: Optional[str] = None
+    project_goal: Optional[str] = None
+    project_end_product: Optional[str] = None
+    project_target_host: Optional[str] = None
+    persist: bool = True
+
+
+class OntologyPreviewResponse(BaseModel):
+    project_id: int
+    summary: str = ""
+    nodes: List[OntologyNode] = Field(default_factory=list)
+    edges: List[OntologyEdge] = Field(default_factory=list)
+    query_augmentation: OntologyQueryAugmentation = Field(default_factory=OntologyQueryAugmentation)
+    persisted: bool = False
+    sync_message: str = ""
+
+
+class OntologyReviewRequest(BaseModel):
+    target_type: Literal["node", "edge"]
+    target_id: str
+    status: Literal["inferred", "confirmed", "rejected", "edited"]
+    reviewer_note: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -582,6 +678,98 @@ class CreateProjectResponse(BaseModel):
     created_persona_ids: List[int] = Field(default_factory=list)
 
 
+class CreateProjectCollaboratorRequest(BaseModel):
+    name: str
+    role: Optional[str] = "workflow_partner"
+    workflow_stage: Optional[str] = "general"
+    focus_area: Optional[str] = None
+    goals: List[str] = Field(default_factory=list)
+    workflow_focus: List[str] = Field(default_factory=list)
+    starter_questions: List[str] = Field(default_factory=list)
+    summary: Optional[str] = None
+
+
+class CreateProjectCollaboratorResponse(BaseModel):
+    project: ProjectResponse
+    persona: ProjectWorkflowPersona
+
+
+class ProjectQuerySession(BaseModel):
+    id: int
+    project_id: int
+    title: str
+    query: str
+    state: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+    updated_at: str
+
+
+class ProjectQuerySessionListResponse(BaseModel):
+    queries: List[ProjectQuerySession] = Field(default_factory=list)
+
+
+class CreateProjectQuerySessionRequest(BaseModel):
+    title: Optional[str] = None
+    query: str
+    state: Dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateProjectQuerySessionRequest(BaseModel):
+    title: Optional[str] = None
+    query: Optional[str] = None
+    state: Optional[Dict[str, Any]] = None
+
+
+class ProjectJourneyEvent(BaseModel):
+    id: int
+    event_type: str
+    title: str
+    detail: str = ""
+    timestamp: str
+    query_id: Optional[int] = None
+    persona_id: Optional[int] = None
+    objective_id: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectJourneyPath(BaseModel):
+    id: str
+    query_id: int
+    query_title: str
+    query: str
+    selected_persona_id: Optional[int] = None
+    selected_persona_name: Optional[str] = None
+    selected_objective_id: Optional[str] = None
+    selected_objective_title: Optional[str] = None
+    active_flow_step: Optional[str] = None
+    updated_at: str
+    literature_count: int = 0
+    judgment_count: int = 0
+    gap_count: int = 0
+    proposal_count: int = 0
+    plan_step_count: int = 0
+    summary: str = ""
+    next_action_hint: str = ""
+    recent_events: List[ProjectJourneyEvent] = Field(default_factory=list)
+
+
+class ProjectJourneySummary(BaseModel):
+    total_queries: int = 0
+    explored_collaborators: int = 0
+    explored_objectives: int = 0
+    literature_findings: int = 0
+    judgment_calls: int = 0
+    proposal_candidates: int = 0
+    event_count: int = 0
+
+
+class ProjectJourneyResponse(BaseModel):
+    project: ProjectResponse
+    summary: ProjectJourneySummary
+    paths: List[ProjectJourneyPath] = Field(default_factory=list)
+    events: List[ProjectJourneyEvent] = Field(default_factory=list)
+
+
 class ResearchFinding(BaseModel):
     id: str
     citation: str = ""
@@ -589,6 +777,12 @@ class ResearchFinding(BaseModel):
     knowns: List[str] = Field(default_factory=list)
     unknowns: List[str] = Field(default_factory=list)
     relevance: str = ""
+    source_ids: Dict[str, str] = Field(default_factory=dict)
+    annotation_insights: List[str] = Field(default_factory=list)
+    generated_questions: List[str] = Field(default_factory=list)
+    judgment_calls: List[Dict[str, Any]] = Field(default_factory=list)
+    validation_tracks: List[Dict[str, Any]] = Field(default_factory=list)
+    synthesis_memo: str = ""
 
 
 class ResearchGap(BaseModel):
@@ -597,6 +791,16 @@ class ResearchGap(BaseModel):
     supporting_signals: List[str] = Field(default_factory=list)
     next_question: str = ""
     priority_note: str = ""
+
+
+class CrossPaperSynthesis(BaseModel):
+    summary: str = ""
+    evidence_matrix: List[Dict[str, Any]] = Field(default_factory=list)
+    consensus_patterns: List[str] = Field(default_factory=list)
+    contradictions_or_tensions: List[str] = Field(default_factory=list)
+    transferability_assumptions: List[str] = Field(default_factory=list)
+    gap_rationale: List[str] = Field(default_factory=list)
+    validation_priorities: List[str] = Field(default_factory=list)
 
 
 class JudgmentCall(BaseModel):
@@ -612,6 +816,7 @@ class ValidationTrack(BaseModel):
     method: str = ""
     questions: List[str] = Field(default_factory=list)
     success_signal: str = ""
+    execution_result: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ProposalCandidate(BaseModel):
@@ -620,6 +825,10 @@ class ProposalCandidate(BaseModel):
     why_now: str = ""
     experiment_outline: str = ""
     readouts: List[str] = Field(default_factory=list)
+    source_refs: List[str] = Field(default_factory=list)
+    gap_refs: List[str] = Field(default_factory=list)
+    judgment_refs: List[str] = Field(default_factory=list)
+    validation_refs: List[str] = Field(default_factory=list)
 
 
 class ResearchWorkTemplate(BaseModel):
@@ -635,6 +844,8 @@ class ResearchWorkTemplate(BaseModel):
 class FetchProjectLiteratureRequest(BaseModel):
     persona_id: int
     query: str
+    workflow_mode: Literal["legacy", "sota"] = "legacy"
+    query_variant_count: int = 8
     objective_id: Optional[str] = None
     objective_title: Optional[str] = None
     objective_definition: Optional[str] = None
@@ -651,6 +862,40 @@ class FetchProjectLiteratureRequest(BaseModel):
     existing_citations: List[str] = Field(default_factory=list)
 
 
+class SynthesizeLiteratureGapsRequest(BaseModel):
+    persona_id: int
+    query: str
+    project_goal: Optional[str] = None
+    project_end_product: Optional[str] = None
+    project_target_host: Optional[str] = None
+    objective_id: Optional[str] = None
+    objective_title: Optional[str] = None
+    objective_definition: Optional[str] = None
+    objective_signals: List[str] = Field(default_factory=list)
+    work_template: ResearchWorkTemplate
+    max_gaps: int = 6
+
+
+class SynthesizeLiteratureGapsResponse(BaseModel):
+    gaps: List[ResearchGap] = Field(default_factory=list)
+    synthesis_summary: str = ""
+    cross_paper_synthesis: CrossPaperSynthesis = Field(default_factory=CrossPaperSynthesis)
+
+
+class RunValidationTrackRequest(BaseModel):
+    persona_id: int
+    track: ValidationTrack
+    query: Optional[str] = None
+    project_goal: Optional[str] = None
+    objective_title: Optional[str] = None
+
+
+class RunValidationTrackResponse(BaseModel):
+    status: Literal["success", "unsupported", "error"]
+    message: str
+    result: Dict[str, Any] = Field(default_factory=dict)
+
+
 class LiteratureToolTrace(BaseModel):
     tool_name: str
     query: str
@@ -659,12 +904,85 @@ class LiteratureToolTrace(BaseModel):
     error_message: Optional[str] = None
 
 
+class WorkflowStageTrace(BaseModel):
+    run_id: str = ""
+    stage: str
+    status: Literal[
+        "success",
+        "success_with_warnings",
+        "skipped",
+        "missing_capability",
+        "error",
+    ] = "success"
+    message: str = ""
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    duration_ms: Optional[float] = None
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    outputs: Dict[str, Any] = Field(default_factory=dict)
+    errors: List[str] = Field(default_factory=list)
+
+
 class FetchProjectLiteratureResponse(BaseModel):
     findings: List[ResearchFinding] = Field(default_factory=list)
     tool_trace: LiteratureToolTrace
     objective_lens: Optional[str] = None
     processing_summary: str = ""
     elicitation_questions: List[str] = Field(default_factory=list)
+    workflow_trace: List[WorkflowStageTrace] = Field(default_factory=list)
+
+
+class PaperAnnotation(BaseModel):
+    page: int
+    snippet: str
+    reason: str
+    matched_terms: List[str] = Field(default_factory=list)
+    score: float = 0.0
+
+
+class PaperStructuredNotes(BaseModel):
+    evidence_claims: List[str] = Field(default_factory=list)
+    methods: List[str] = Field(default_factory=list)
+    quantitative_benchmarks: List[str] = Field(default_factory=list)
+    limitations: List[str] = Field(default_factory=list)
+    transferability_notes: List[str] = Field(default_factory=list)
+    research_gaps: List[str] = Field(default_factory=list)
+
+
+class PreparePaperPdfRequest(BaseModel):
+    persona_id: int
+    finding: ResearchFinding
+    query: str
+    workflow_mode: Literal["legacy", "sota"] = "legacy"
+    project_goal: Optional[str] = None
+    project_end_product: Optional[str] = None
+    project_target_host: Optional[str] = None
+    persona_name: Optional[str] = None
+    persona_focus: Optional[str] = None
+    objective_id: Optional[str] = None
+    objective_title: Optional[str] = None
+    objective_definition: Optional[str] = None
+    objective_signals: List[str] = Field(default_factory=list)
+    max_annotations: int = 8
+
+
+class PreparePaperPdfResponse(BaseModel):
+    status: Literal["success", "not_open_access", "error"]
+    message: str
+    paper_id: Optional[str] = None
+    pmid: Optional[str] = None
+    pmcid: Optional[str] = None
+    source_pdf_url: Optional[str] = None
+    original_pdf_path: Optional[str] = None
+    annotated_pdf_path: Optional[str] = None
+    annotated_pdf_url: Optional[str] = None
+    annotations: List[PaperAnnotation] = Field(default_factory=list)
+    insights: List[str] = Field(default_factory=list)
+    passage_insights: List[str] = Field(default_factory=list)
+    structured_notes: PaperStructuredNotes = Field(default_factory=PaperStructuredNotes)
+    research_questions: List[str] = Field(default_factory=list)
+    visual_annotations: bool = False
+    workflow_trace: List[WorkflowStageTrace] = Field(default_factory=list)
 
 
 class GenerateProjectPlanRequest(BaseModel):

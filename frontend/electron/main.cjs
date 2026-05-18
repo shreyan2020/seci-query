@@ -1,8 +1,8 @@
-const { app, BrowserWindow, nativeTheme, dialog } = require('electron');
+const { app, BrowserWindow, nativeTheme, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const isDev = process.env.ELECTRON_DEV === '1' || !app.isPackaged;
 const WEB_URL = process.env.ELECTRON_WEB_URL || 'http://localhost:3000';
@@ -14,10 +14,23 @@ const DEFAULT_RUNTIME_CONFIG = {
   ollamaModel: 'qwen2.5:7b',
 };
 
+const PYTHON_IMPORT_CHECK = [
+  'import fastapi, uvicorn, pydantic, httpx, pypdf, fitz',
+  'import multipart',
+].join('; ');
+
 let mainWindow = null;
 let webProc = null;
 let apiProc = null;
 let activeFrontendPort = FRONTEND_PORT;
+
+ipcMain.handle('open-path', async (_event, targetPath) => {
+  if (!targetPath || typeof targetPath !== 'string') {
+    return { ok: false, error: 'missing_path' };
+  }
+  const errorMessage = await shell.openPath(targetPath);
+  return errorMessage ? { ok: false, error: errorMessage } : { ok: true };
+});
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -100,6 +113,59 @@ function pythonCommandCandidates() {
   return [{ cmd: 'python3', args: [] }, { cmd: 'python', args: [] }];
 }
 
+function runPython(candidate, extraArgs, options = {}) {
+  return spawnSync(candidate.cmd, [...candidate.args, ...extraArgs], {
+    encoding: 'utf8',
+    windowsHide: true,
+    ...options,
+  });
+}
+
+function findUsablePython() {
+  for (const candidate of pythonCommandCandidates()) {
+    const version = runPython(candidate, ['--version']);
+    if (version.error || version.status !== 0) continue;
+
+    const check = runPython(candidate, ['-c', PYTHON_IMPORT_CHECK]);
+    if (!check.error && check.status === 0) {
+      return { candidate, ready: true, details: 'dependencies available' };
+    }
+    return {
+      candidate,
+      ready: false,
+      details: `${check.stderr || check.stdout || 'missing backend dependency'}`.trim(),
+    };
+  }
+
+  return { candidate: null, ready: false, details: 'Python was not found on PATH.' };
+}
+
+function ensureBackendDependencies(candidate, backendDir) {
+  const requirementsPath = path.join(backendDir, 'requirements.txt');
+  if (!fs.existsSync(requirementsPath)) {
+    throw new Error(`Missing backend requirements file: ${requirementsPath}`);
+  }
+
+  const install = runPython(candidate, ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', requirementsPath], {
+    cwd: backendDir,
+  });
+  if (install.error || install.status !== 0) {
+    throw new Error(
+      [
+        'Backend Python dependencies are missing and automatic installation failed.',
+        '',
+        `Command: ${candidate.cmd} ${[...candidate.args, '-m', 'pip', 'install', '-r', requirementsPath].join(' ')}`,
+        install.stderr || install.stdout || String(install.error || 'unknown pip error'),
+      ].join('\n')
+    );
+  }
+
+  const recheck = runPython(candidate, ['-c', PYTHON_IMPORT_CHECK]);
+  if (recheck.error || recheck.status !== 0) {
+    throw new Error(`Backend dependencies were installed, but import validation still failed: ${recheck.stderr || recheck.stdout || recheck.error}`);
+  }
+}
+
 async function findAvailablePort(startPort, maxTries = 20) {
   for (let port = startPort; port < startPort + maxTries; port += 1) {
     const free = await new Promise((resolve) => {
@@ -125,46 +191,42 @@ function startBackendPackaged() {
   const dbPath = path.join(runtimeDataRoot, 'unspecified_queries.db');
   const interviewRoot = path.join(runtimeDataRoot, 'interviews');
 
-  const candidates = pythonCommandCandidates();
-  let started = false;
-  let lastError = null;
+  let python = findUsablePython();
+  if (!python.candidate) {
+    throw new Error('Python is required to run the local backend, but it was not found on PATH.');
+  }
+  if (!python.ready) {
+    ensureBackendDependencies(python.candidate, backendDir);
+    python = findUsablePython();
+  }
+  if (!python.ready || !python.candidate) {
+    throw new Error(`Backend Python dependency check failed: ${python.details}`);
+  }
 
-  for (const candidate of candidates) {
-    try {
-      const proc = spawn(
-        candidate.cmd,
-        [...candidate.args, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT), '--app-dir', backendDir],
-        {
-          cwd: runtimeDataRoot,
-          env: {
-            ...process.env,
-            DATABASE_PATH: dbPath,
-            INTERVIEW_TEXT_ROOT: interviewRoot,
-            APP_CONFIG_PATH: configPath,
-            OLLAMA_MODEL: String(config.ollamaModel || DEFAULT_RUNTIME_CONFIG.ollamaModel),
-            OLLAMA_BASE_URL: String(config.ollamaBaseUrl || DEFAULT_RUNTIME_CONFIG.ollamaBaseUrl),
-            OLLAMA_URL: String(config.ollamaBaseUrl || DEFAULT_RUNTIME_CONFIG.ollamaBaseUrl),
-          },
-          stdio: ['ignore', 'pipe', 'pipe'],
-        }
-      );
-
-      proc.on('error', (err) => {
-        lastError = err;
-      });
-
-      apiProc = proc;
-      wireProcessLogs('API', apiProc);
-      started = true;
-      break;
-    } catch (err) {
-      lastError = err;
+  const proc = spawn(
+    python.candidate.cmd,
+    [...python.candidate.args, '-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT), '--app-dir', backendDir],
+    {
+      cwd: runtimeDataRoot,
+      env: {
+        ...process.env,
+        DATABASE_PATH: dbPath,
+        INTERVIEW_TEXT_ROOT: interviewRoot,
+        APP_CONFIG_PATH: configPath,
+        OLLAMA_MODEL: String(config.ollamaModel || DEFAULT_RUNTIME_CONFIG.ollamaModel),
+        OLLAMA_BASE_URL: String(config.ollamaBaseUrl || DEFAULT_RUNTIME_CONFIG.ollamaBaseUrl),
+        OLLAMA_URL: String(config.ollamaBaseUrl || DEFAULT_RUNTIME_CONFIG.ollamaBaseUrl),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
     }
-  }
+  );
 
-  if (!started) {
-    throw new Error(`Failed to start backend Python process: ${String(lastError || 'unknown error')}`);
-  }
+  proc.on('error', (err) => {
+    dialog.showErrorBox('SECI Persona Studio Backend Failed', String(err));
+  });
+
+  apiProc = proc;
+  wireProcessLogs('API', apiProc);
 }
 
 async function startWebPackaged() {
@@ -285,7 +347,7 @@ app.whenReady().then(async () => {
         '',
         'Check prerequisites:',
         '1) Python installed and available in PATH',
-        '2) Backend Python dependencies installed',
+        '2) Internet access if the app needs to install missing Python packages on first launch',
         '3) Ollama installed and running',
       ].join('\n')
     );

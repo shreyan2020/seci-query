@@ -401,6 +401,10 @@ Return ONLY valid JSON using this exact shape:
         "evidence_facts": ["string"],
         "examples": ["string"],
         "dependencies": ["step_1"],
+        "source_refs": ["S1 or citation/source id"],
+        "gap_refs": ["gap id or gap theme"],
+        "judgment_refs": ["judgment id or stance"],
+        "validation_refs": ["validation id, target, method, or tool result"],
         "expected_outcome": "string",
         "confidence": 0.75
       }}
@@ -545,6 +549,7 @@ Planning requirements:
    - translate validation tracks into decision-useful experiments or analyses
    - carry promising proposal seeds forward instead of restarting from zero
 12) When the template references analog compounds, neighboring conditions, or transferable examples, state the generalization assumptions explicitly.
+13) Make traceability explicit. For every step, include the paper/source refs, gap refs, user judgment refs, and validation refs that justify the step. If a ref is unavailable, leave that array empty rather than inventing a source.
 
 Return ONLY valid JSON using this exact shape:
 {{
@@ -565,6 +570,10 @@ Return ONLY valid JSON using this exact shape:
         "evidence_facts": ["string"],
         "examples": ["string"],
         "dependencies": ["step_1"],
+        "source_refs": ["S1 or citation/source id"],
+        "gap_refs": ["gap id or gap theme"],
+        "judgment_refs": ["judgment id or stance"],
+        "validation_refs": ["validation id, target, method, or tool result"],
         "expected_outcome": "string",
         "confidence": 0.75
       }}

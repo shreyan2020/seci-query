@@ -14,7 +14,7 @@ export function ProjectOverview({ selectedProject }: ProjectOverviewProps) {
           <p className="mt-2 text-sm leading-6 text-slate-600">{selectedProject.project_goal || 'No program goal captured yet.'}</p>
         </div>
 
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-2">
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-800">End Product</div>
             <div className="mt-1 text-sm font-semibold text-emerald-950">{selectedProject.end_product}</div>
@@ -22,10 +22,6 @@ export function ProjectOverview({ selectedProject }: ProjectOverviewProps) {
           <div className="rounded-2xl border border-sky-200 bg-sky-50 p-3">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-800">Host</div>
             <div className="mt-1 text-sm font-semibold text-sky-950">{selectedProject.target_host}</div>
-          </div>
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3">
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-800">Project Collaborators</div>
-            <div className="mt-1 text-sm font-semibold text-amber-950">{selectedProject.personas.length}</div>
           </div>
         </div>
       </div>
