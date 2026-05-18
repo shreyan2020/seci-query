@@ -295,11 +295,11 @@ export function ResearchWorkTemplateSection({
   pdfAnnotationStatus,
   reviewStage,
   onCompleteReview,
-  onMoveToProposalSynthesis,
   onGeneratePlan,
   loadingPlan,
 }: ResearchWorkTemplateSectionProps) {
   const [activeFindingIndex, setActiveFindingIndex] = useState(0);
+  const [proposalSynthesisNotice, setProposalSynthesisNotice] = useState('');
   const findingCount = workTemplate.literature_findings.length;
   const activeFinding = findingCount > 0 ? workTemplate.literature_findings[Math.min(activeFindingIndex, findingCount - 1)] : null;
   const activeJudgments = activeFinding?.judgment_calls || [];
@@ -547,9 +547,6 @@ export function ResearchWorkTemplateSection({
               <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-800">Final Literature Review</div>
               <div className="mt-1 text-lg font-semibold text-slate-950">Compiled evidence summary</div>
             </div>
-            <button onClick={onMoveToProposalSynthesis} className={cardButtonClass('primary')}>
-              Move to proposal synthesis
-            </button>
           </div>
 
           <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
@@ -774,6 +771,23 @@ export function ResearchWorkTemplateSection({
                 placeholder="Compiled literature review summary..."
               />
             </div>
+            </div>
+          </div>
+          <div className="mt-5 border-t border-sky-100 pt-4">
+            {proposalSynthesisNotice && (
+              <div className="mb-3 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm leading-6 text-sky-950">
+                {proposalSynthesisNotice}
+              </div>
+            )}
+            <div className="flex justify-end">
+              <button
+                onClick={() => {
+                  setProposalSynthesisNotice('Proposal synthesis is work in progress and not available in this trial build yet.');
+                }}
+                className={cardButtonClass('primary')}
+              >
+                Move to proposal synthesis
+              </button>
             </div>
           </div>
         </section>

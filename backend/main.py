@@ -1,12 +1,18 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from typing import Optional, List, Dict, Any
 import asyncio
 import os
+from datetime import datetime
 from pathlib import Path
 import json
+import platform
 import re
+import shutil
+import sys
+import tempfile
+import zipfile
 
 from models import (
     ObjectivesRequest, ObjectivesResponse, Objective,
@@ -48,9 +54,9 @@ from models import (
     ProjectWorkspaceState, ProjectWorkspaceRequest, ProjectWorkspaceResponse,
     StartProjectExecutionRequest, ProjectExecutionEvent, ProjectExecutionRunResponse,
     FetchProjectLiteratureRequest, FetchProjectLiteratureResponse, LiteratureToolTrace, ResearchFinding,
-    SynthesizeLiteratureGapsRequest, SynthesizeLiteratureGapsResponse, ResearchGap,
+    SynthesizeLiteratureGapsRequest, SynthesizeLiteratureGapsResponse, ResearchGap, CrossPaperSynthesis,
     PreparePaperPdfRequest, PreparePaperPdfResponse, PaperAnnotation,
-    TacitMemoryItem, WorkspaceMemory, WorkspaceMemoryRequest, WorkspaceMemoryResponse,
+    TacitMemoryItem, TacitElicitationQuestion, WorkspaceMemory, WorkspaceMemoryRequest, WorkspaceMemoryResponse,
     BuildOntologyPreviewRequest, BuildPaperOntologyRequest, OntologyPreviewResponse, OntologyReviewRequest,
     RunValidationTrackRequest, RunValidationTrackResponse,
 )
@@ -84,8 +90,10 @@ from qmd_client import health_check as qmd_health_check
 from persona_templates import list_persona_templates, get_persona_template
 from project_workflows import build_project_personas
 from agent_execution import run_agentic_execution, to_execution_response
-from research_tools import annotate_pdf_for_objective, download_open_access_pdf, extract_paper_ids, search_literature
-from ontology_service import build_ontology_preview, build_paper_ontology, ontology_response_from_graph
+from research_tools import annotate_pdf_for_objective, download_open_access_pdf, extract_paper_ids, fallback_cross_paper_synthesis, search_literature
+from scientific_pdf_parsing import parse_scientific_pdf
+from ontology_service import build_ontology_preview, build_paper_ontology_enriched, ontology_response_from_graph
+from sota_literature_workflow import WorkflowError, WorkflowTraceLogger, run_sota_literature_workflow
 
 app = FastAPI(title="SECI Query Explorer API", version="1.0.0")
 
@@ -103,11 +111,24 @@ _PROJECT_STAGE_ORDER = {
 
 ensure_context_root()
 
+def _parse_cors_origins() -> tuple[list[str], bool]:
+    raw = os.getenv("CORS_ORIGINS", "")
+    defaults = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    origins = []
+    for origin in [*defaults, *raw.split(",")]:
+        clean = origin.strip().rstrip("/")
+        if clean and clean not in origins:
+            origins.append(clean)
+    return (["*"], True) if "*" in origins else (origins, False)
+
+
+_cors_origins, _cors_allow_all = _parse_cors_origins()
+
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],  # Next.js dev server
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=not _cors_allow_all,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1296,11 +1317,27 @@ def _literature_record_to_research_finding(record: dict, index: int) -> Research
     labels = [*sources, "literature fetch"]
     if year:
         labels.append(year)
+    relevance_score = record.get("relevance_score")
+    if isinstance(relevance_score, (int, float)):
+        labels.append(f"relevance score: {float(relevance_score):.2f}")
+    matched_terms = [str(item).strip() for item in (record.get("matched_query_terms") or []) if str(item).strip()]
+    if matched_terms:
+        labels.append(f"matched terms: {', '.join(matched_terms[:6])}")
+    matched_phrases = [str(item).strip() for item in (record.get("matched_context_phrases") or []) if str(item).strip()]
+    if matched_phrases:
+        labels.append(f"matched phrases: {', '.join(matched_phrases[:3])}")
+    evidence_role = str(record.get("evidence_role") or "").strip()
+    if evidence_role:
+        labels.append(f"evidence role: {evidence_role}")
     source_ids = {
         key: str(record.get(key) or "").strip()
-        for key in ["pmid", "pmcid", "doi", "pdf_url"]
+        for key in ["pmid", "pmcid", "doi", "pdf_url", "semantic_scholar_paper_id"]
         if str(record.get(key) or "").strip()
     }
+    relevance_parts = [abstract]
+    llm_rationale = str(record.get("llm_rank_rationale") or "").strip()
+    if llm_rationale:
+        relevance_parts.insert(0, f"Ranking rationale: {llm_rationale}")
     for key, value in source_ids.items():
         labels.append(f"{key.upper()}: {value}")
     return ResearchFinding(
@@ -1309,7 +1346,7 @@ def _literature_record_to_research_finding(record: dict, index: int) -> Research
         labels=labels,
         knowns=[title] if title else [],
         unknowns=[],
-        relevance=_trim_to_sentence_boundary(abstract, max_chars=1200),
+        relevance=_trim_to_sentence_boundary("\n\n".join(part for part in relevance_parts if part), max_chars=1200),
         source_ids=source_ids,
     )
 
@@ -1946,7 +1983,7 @@ async def build_project_paper_ontology(project_id: int, request: BuildPaperOntol
         if not _persona_belongs_to_project(persona, row):
             raise HTTPException(status_code=400, detail="Selected persona does not belong to this project")
 
-    preview = build_paper_ontology(project_id, request)
+    preview = await build_paper_ontology_enriched(project_id, request)
     if request.persist:
         graph = db.upsert_project_ontology(
             project_id,
@@ -2284,6 +2321,7 @@ def _gap_source_text(work_template: ResearchWorkTemplate) -> str:
 def _fallback_gap_synthesis(request: SynthesizeLiteratureGapsRequest) -> SynthesizeLiteratureGapsResponse:
     source_text = _gap_source_text(request.work_template)
     lower = source_text.lower()
+    cross_paper = CrossPaperSynthesis.model_validate(fallback_cross_paper_synthesis(request.work_template))
     specs = [
         ("AI-enabled enzyme improvement", ["ai", "enzyme", "structure", "model", "generative", "activity", "side activity", "expression", "ugt", "fls", "f3h"], "Which enzymes should be improved, and what assay condition proves the variant is better?", "Prioritize if enzyme activity, specificity, or expression limits the target pathway."),
         ("Synthetic biology method selection", ["crispr", "biosensor", "evolution", "co-culture", "coculture", "dynamic", "regulation"], "Which synthetic biology tool is worth using versus treating as out of scope?", "Separate methods already routine in the lab from methods that require new capability."),
@@ -2304,13 +2342,18 @@ def _fallback_gap_synthesis(request: SynthesizeLiteratureGapsRequest) -> Synthes
             ResearchGap(
                 id="gap_transferability",
                 theme="Transferability of literature examples",
-                supporting_signals=[item for finding in request.work_template.literature_findings[:4] for item in finding.unknowns[:1] if item.strip()][:5],
+                supporting_signals=(cross_paper.gap_rationale or cross_paper.transferability_assumptions)[:5],
                 next_question="Which fetched result is close enough to the target project to justify an experiment?",
                 priority_note="Use user judgment to separate strong evidence from loose analogy.",
             )
         )
     limit = max(1, min(request.max_gaps or 6, 10))
-    return SynthesizeLiteratureGapsResponse(gaps=gaps[:limit], synthesis_summary=f"Generated {len(gaps[:limit])} editable gap cluster(s).")
+    summary = f"{cross_paper.summary} Generated {len(gaps[:limit])} editable gap cluster(s)."
+    return SynthesizeLiteratureGapsResponse(
+        gaps=gaps[:limit],
+        synthesis_summary=summary.strip(),
+        cross_paper_synthesis=cross_paper,
+    )
 
 
 async def _synthesize_literature_gaps_with_llm(
@@ -2323,8 +2366,9 @@ async def _synthesize_literature_gaps_with_llm(
     if not source_text.strip():
         return fallback
     limit = max(1, min(request.max_gaps or 6, 10))
+    fallback_cross = fallback.cross_paper_synthesis
     prompt = f"""
-You are clustering research gaps from a biotech literature review. Return strict JSON only.
+You are doing cross-paper analysis for a biotech literature review. Return strict JSON only.
 
 Project goal: {request.project_goal or project.get('project_goal') or ''}
 End product: {request.project_end_product or project.get('end_product') or ''}
@@ -2333,14 +2377,39 @@ Query: {request.query}
 Objective: {request.objective_title or ''} {request.objective_definition or ''}
 Collaborator: {persona.get('name') or ''}
 
-Reviewed literature state:
-{source_text[:14000]}
+Cross-paper evidence matrix:
+{json.dumps(fallback_cross.evidence_matrix, ensure_ascii=False, indent=2)[:12000]}
 
-Create up to {limit} editable gap clusters. Prefer AI enzyme design, synthetic biology tools, process/measurement boundaries, pathway bottlenecks, and generalization validity only when supported by the reviewed state. Do not invent unsupported tool paths or papers.
+Reviewed literature state:
+{source_text[:10000]}
+
+Create a cross-paper synthesis and up to {limit} editable gap clusters.
+Compare sources explicitly: consensus, contradictions/tensions, transferability assumptions, gap rationale, and validation priorities.
+Prefer AI enzyme design, synthetic biology tools, process/measurement boundaries, pathway bottlenecks, and generalization validity only when supported by the reviewed state.
+Do not invent unsupported tool paths, measurements, genes, organisms, or papers.
 
 Return JSON:
 {{
   "synthesis_summary": "short summary",
+  "cross_paper_synthesis": {{
+    "summary": "cross-paper comparison summary",
+    "evidence_matrix": [
+      {{
+        "source_key": "S1",
+        "citation": "citation",
+        "knowns": ["direct evidence"],
+        "unknowns": ["open questions"],
+        "annotation_insights": ["structured PDF or passage notes"],
+        "judgments": ["user/system judgment signals"],
+        "validation_tracks": ["validation paths"]
+      }}
+    ],
+    "consensus_patterns": ["pattern supported by multiple sources or repeated signals"],
+    "contradictions_or_tensions": ["conflicting evidence, boundary condition, or missing context"],
+    "transferability_assumptions": ["assumption needed before applying a result to this project"],
+    "gap_rationale": ["why a gap matters, grounded in the evidence matrix"],
+    "validation_priorities": ["validation path or readout that would reduce uncertainty"]
+  }},
   "gaps": [
     {{
       "id": "stable snake_case id",
@@ -2356,21 +2425,37 @@ Return JSON:
         payload = await ollama.generate_json(prompt, max_retries=1, temperature=0.15, top_p=0.9)
         raw_gaps = payload.get("gaps") if isinstance(payload, dict) else []
         gaps = [ResearchGap.model_validate(item) for item in raw_gaps if isinstance(item, dict)]
+        raw_cross = payload.get("cross_paper_synthesis") if isinstance(payload, dict) else None
+        cross_paper = CrossPaperSynthesis.model_validate(raw_cross) if isinstance(raw_cross, dict) else fallback_cross
+        if not cross_paper.evidence_matrix:
+            cross_paper = cross_paper.model_copy(update={"evidence_matrix": fallback_cross.evidence_matrix})
         if gaps:
-            return SynthesizeLiteratureGapsResponse(gaps=gaps[:limit], synthesis_summary=str(payload.get("synthesis_summary") or fallback.synthesis_summary))
+            summary = str(payload.get("synthesis_summary") or cross_paper.summary or fallback.synthesis_summary)
+            return SynthesizeLiteratureGapsResponse(
+                gaps=gaps[:limit],
+                synthesis_summary=summary,
+                cross_paper_synthesis=cross_paper,
+            )
     except Exception:
         pass
     return fallback
 
 
-def _ontology_search_context(project_id: int) -> str:
+def _project_ontology_augmentation(project_id: int):
     graph = db.get_project_ontology(project_id)
     nodes = graph.get("nodes") or []
     edges = graph.get("edges") or []
     if not nodes and not edges:
-        return ""
+        return None
     response = ontology_response_from_graph(project_id, nodes, edges, persisted=True, last_synced_at=graph.get("last_synced_at"))
     augmentation = response.query_augmentation
+    return augmentation
+
+
+def _ontology_search_context(project_id: int) -> str:
+    augmentation = _project_ontology_augmentation(project_id)
+    if not augmentation:
+        return ""
     parts = []
     if augmentation.expanded_terms:
         parts.append(f"Ontology expansion terms: {', '.join(augmentation.expanded_terms[:18])}")
@@ -2400,7 +2485,111 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
         raise HTTPException(status_code=400, detail="Literature query is required")
 
     max_results = max(1, min(int(request.max_results or 5), 8))
-    ontology_context = _ontology_search_context(project_id)
+    ontology_augmentation = _project_ontology_augmentation(project_id)
+    ontology_context = ""
+    if ontology_augmentation:
+        ontology_parts = []
+        if ontology_augmentation.expanded_terms:
+            ontology_parts.append(f"Ontology expansion terms: {', '.join(ontology_augmentation.expanded_terms[:18])}")
+        if ontology_augmentation.reasoning_lenses:
+            ontology_parts.append(f"Ontology reasoning lenses: {', '.join(ontology_augmentation.reasoning_lenses[:10])}")
+        if ontology_augmentation.tacit_context:
+            ontology_parts.append(f"Confirmed/inferred tacit context: {'; '.join(ontology_augmentation.tacit_context[:6])}")
+        if ontology_augmentation.search_routing:
+            ontology_parts.append(f"Ontology search routing: {', '.join(ontology_augmentation.search_routing)}")
+        ontology_context = "\n".join(ontology_parts)
+
+    if request.workflow_mode == "sota":
+        try:
+            result = await run_sota_literature_workflow(
+                project_id=project_id,
+                project=project,
+                persona=persona,
+                request=request,
+                ontology_context=ontology_context,
+                max_results=max_results,
+            )
+            existing = {str(item or "").strip().lower() for item in (request.existing_citations or []) if str(item or "").strip()}
+            findings = [
+                finding
+                for finding in (result.get("findings") or [])
+                if finding.citation.strip().lower() not in existing
+            ]
+            trace = LiteratureToolTrace(
+                tool_name="sota_literature_workflow",
+                query=" | ".join(str(item.get("query") or "") for item in (result.get("query_variants") or [])[:4] if isinstance(item, dict)),
+                result_count=len(findings),
+                status="success",
+            )
+            await log_event_safe(
+                "project_literature_fetched_sota",
+                {
+                    "project_id": project_id,
+                    "persona_id": request.persona_id,
+                    "objective_id": request.objective_id,
+                    "objective_title": request.objective_title,
+                    "workflow_mode": request.workflow_mode,
+                    "run_id": result.get("run_id"),
+                    "query": query,
+                    "query_variants": result.get("query_variants") or [],
+                    "source_counts": result.get("source_counts") or {},
+                    "record_count": result.get("record_count"),
+                    "new_findings": len(findings),
+                    "ontology_context_used": bool(ontology_context),
+                    "workflow_trace": [item.model_dump() for item in (result.get("workflow_trace") or [])],
+                },
+            )
+            return FetchProjectLiteratureResponse(
+                findings=findings,
+                tool_trace=trace,
+                objective_lens=result.get("objective_lens"),
+                processing_summary=str(result.get("processing_summary") or ""),
+                elicitation_questions=result.get("elicitation_questions") or [],
+                workflow_trace=result.get("workflow_trace") or [],
+            )
+        except WorkflowError as exc:
+            trace = LiteratureToolTrace(
+                tool_name="sota_literature_workflow",
+                query=query,
+                result_count=0,
+                status="error",
+                error_message=str(exc),
+            )
+            await log_event_safe(
+                "project_literature_fetch_sota_failed",
+                {
+                    "project_id": project_id,
+                    "persona_id": request.persona_id,
+                    "objective_id": request.objective_id,
+                    "tool_name": trace.tool_name,
+                    "query": query,
+                    "failed_stage": exc.stage,
+                    "error": str(exc),
+                    "workflow_trace": [item.model_dump() for item in exc.trace],
+                },
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": f"SOTA literature workflow failed at {exc.stage}: {exc}",
+                    "failed_stage": exc.stage,
+                    "workflow_trace": [item.model_dump() for item in exc.trace],
+                },
+            ) from exc
+        except Exception as exc:
+            await log_event_safe(
+                "project_literature_fetch_sota_failed",
+                {
+                    "project_id": project_id,
+                    "persona_id": request.persona_id,
+                    "objective_id": request.objective_id,
+                    "tool_name": "sota_literature_workflow",
+                    "query": query,
+                    "error": str(exc),
+                },
+            )
+            raise HTTPException(status_code=502, detail=f"SOTA literature workflow failed: {exc}") from exc
+
     try:
         result = await search_literature(
             query,
@@ -2459,6 +2648,8 @@ async def fetch_project_literature(project_id: int, request: FetchProjectLiterat
                 "result_count": len(records),
                 "new_findings": len(findings),
                 "ontology_context_used": bool(ontology_context),
+                "ontology_augmentation": ontology_augmentation.model_dump() if ontology_augmentation else None,
+                "ontology_context": ontology_context,
                 "has_processing_summary": bool(processing.get("processing_summary")),
             },
         )
@@ -2596,6 +2787,7 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
         raise HTTPException(status_code=404, detail="Persona not found")
     if not _persona_belongs_to_project(persona, project):
         raise HTTPException(status_code=400, detail="Selected persona does not belong to this project")
+    workflow_logger = WorkflowTraceLogger() if request.workflow_mode == "sota" else None
 
     ids = {
         "pmid": str((request.finding.source_ids or {}).get("pmid") or "").strip(),
@@ -2611,21 +2803,48 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
         " ".join(request.finding.unknowns),
     )
     ids = {key: ids.get(key) or parsed_ids.get(key, "") for key in ["pmid", "pmcid", "doi", "pdf_url"]}
+    if workflow_logger:
+        workflow_logger.record(
+            "paper_identifier_extraction",
+            status="success" if (ids.get("pmid") or ids.get("pmcid") or ids.get("doi")) else "error",
+            message="Extracted paper identifiers from the selected literature finding.",
+            inputs={"citation": request.finding.citation, "source_ids": request.finding.source_ids},
+            outputs=ids,
+        )
     if not ids.get("pmid") and not ids.get("pmcid") and not ids.get("doi"):
         return PreparePaperPdfResponse(
             status="error",
             message="Could not identify a PMID, PMCID, or DOI from this literature finding. Try adding a PMID/PMCID/DOI to the citation or labels.",
+            workflow_trace=workflow_logger.trace if workflow_logger else [],
         )
 
     output_root = Path(os.getenv("PAPER_EVIDENCE_ROOT") or "data/paper_evidence") / f"project_{project_id}"
     try:
-        download = await download_open_access_pdf(
-            pmid=ids.get("pmid", ""),
-            pmcid=ids.get("pmcid", ""),
-            doi=ids.get("doi", ""),
-            pdf_url=ids.get("pdf_url", ""),
-            output_dir=output_root,
-        )
+        download_stage = workflow_logger.start("open_access_pdf_download", inputs=ids) if workflow_logger else None
+        try:
+            download = await download_open_access_pdf(
+                pmid=ids.get("pmid", ""),
+                pmcid=ids.get("pmcid", ""),
+                doi=ids.get("doi", ""),
+                pdf_url=ids.get("pdf_url", ""),
+                output_dir=output_root,
+            )
+        except Exception as exc:
+            if workflow_logger and download_stage is not None:
+                workflow_logger.end(
+                    download_stage,
+                    status="error",
+                    message="Open-access PDF download failed.",
+                    errors=[str(exc)],
+                )
+            raise
+        if workflow_logger and download_stage is not None:
+            workflow_logger.end(
+                download_stage,
+                status="success" if download.get("status") == "success" else "skipped",
+                message=str(download.get("message") or download.get("status") or ""),
+                outputs=download,
+            )
         if download.get("status") != "success":
             return PreparePaperPdfResponse(
                 status="not_open_access",
@@ -2634,34 +2853,106 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
                 pmid=download.get("pmid") or ids.get("pmid") or None,
                 pmcid=download.get("pmcid") or ids.get("pmcid") or None,
                 source_pdf_url=download.get("source_pdf_url"),
+                workflow_trace=workflow_logger.trace if workflow_logger else [],
             )
 
         original_pdf_path = Path(str(download["original_pdf_path"]))
         annotated_pdf_path = original_pdf_path.with_name("annotated.pdf")
-        annotation_result = await annotate_pdf_for_objective(
-            pdf_path=original_pdf_path,
-            query=request.query,
-            project_goal=request.project_goal or str(project.get("project_goal") or ""),
-            project_end_product=request.project_end_product or str(project.get("end_product") or ""),
-            project_target_host=request.project_target_host or str(project.get("target_host") or ""),
-            persona_name=request.persona_name or str(persona.get("name") or ""),
-            persona_focus=request.persona_focus or str(((persona.get("persona_json") or {}).get("project_context") or {}).get("focus_area") or ""),
-            objective_title=request.objective_title or "",
-            objective_definition=request.objective_definition or "",
-            objective_signals=request.objective_signals or [],
-            paper_context=" ".join(
-                [
-                    request.finding.citation,
-                    " ".join(request.finding.labels),
-                    " ".join(request.finding.knowns),
-                    " ".join(request.finding.unknowns),
-                    request.finding.relevance,
-                ]
-            ),
-            output_path=annotated_pdf_path,
-            max_annotations=request.max_annotations,
-        )
+        parser_context = {}
+        if request.workflow_mode == "sota":
+            parser_stage = workflow_logger.start(
+                "scientific_pdf_parsing",
+                inputs={
+                    "original_pdf_path": str(original_pdf_path),
+                    "grobid_url_configured": bool(os.getenv("GROBID_URL")),
+                    "docling_url_configured": bool(os.getenv("DOCLING_URL")),
+                    "docling_enabled": os.getenv("DOCLING_ENABLED", "0") == "1",
+                },
+            )
+            try:
+                parser_context = await parse_scientific_pdf(original_pdf_path)
+                workflow_logger.end(
+                    parser_stage,
+                    status="success_with_warnings" if parser_context.get("errors") else "success",
+                    message="Parsed scientific PDF structure with configured SOTA parser adapters.",
+                    outputs={
+                        "parsers": parser_context.get("parsers") or [],
+                        "configured_parsers": parser_context.get("configured_parsers") or [],
+                        "section_count": len(parser_context.get("sections") or []),
+                        "reference_count": len(parser_context.get("references") or []),
+                        "has_abstract": bool(parser_context.get("abstract")),
+                    },
+                    errors=parser_context.get("errors") or [],
+                )
+            except Exception as exc:
+                workflow_logger.end(
+                    parser_stage,
+                    status="error",
+                    message="Scientific PDF parsing failed.",
+                    errors=[str(exc)],
+                )
+                raise
+        annotation_stage = workflow_logger.start(
+            "strict_pdf_annotation" if request.workflow_mode == "sota" else "pdf_annotation",
+            inputs={
+                "original_pdf_path": str(original_pdf_path),
+                "strict_visual_annotations": request.workflow_mode == "sota",
+                "strict_llm_notes": request.workflow_mode == "sota",
+                "max_annotations": request.max_annotations,
+            },
+        ) if workflow_logger else None
+        try:
+            annotation_result = await annotate_pdf_for_objective(
+                pdf_path=original_pdf_path,
+                query=request.query,
+                project_goal=request.project_goal or str(project.get("project_goal") or ""),
+                project_end_product=request.project_end_product or str(project.get("end_product") or ""),
+                project_target_host=request.project_target_host or str(project.get("target_host") or ""),
+                persona_name=request.persona_name or str(persona.get("name") or ""),
+                persona_focus=request.persona_focus or str(((persona.get("persona_json") or {}).get("project_context") or {}).get("focus_area") or ""),
+                objective_title=request.objective_title or "",
+                objective_definition=request.objective_definition or "",
+                objective_signals=request.objective_signals or [],
+                paper_context=" ".join(
+                    [
+                        request.finding.citation,
+                        " ".join(request.finding.labels),
+                        " ".join(request.finding.knowns),
+                        " ".join(request.finding.unknowns),
+                        request.finding.relevance,
+                        str(parser_context.get("title") or ""),
+                        str(parser_context.get("abstract") or ""),
+                        str(parser_context.get("text_excerpt") or "")[:12000],
+                    ]
+                ),
+                output_path=annotated_pdf_path,
+                max_annotations=request.max_annotations,
+                strict_llm_notes=request.workflow_mode == "sota",
+                strict_visual_annotations=request.workflow_mode == "sota",
+            )
+        except Exception as exc:
+            if workflow_logger and annotation_stage is not None:
+                workflow_logger.end(
+                    annotation_stage,
+                    status="error",
+                    message="Strict PDF annotation failed.",
+                    errors=[str(exc)],
+                )
+            raise
         annotations = [PaperAnnotation.model_validate(item) for item in annotation_result.get("annotations", [])]
+        structured_notes = annotation_result.get("structured_notes") or {}
+        passage_insights = [str(item) for item in (annotation_result.get("passage_insights") or [])]
+        if workflow_logger and annotation_stage is not None:
+            workflow_logger.end(
+                annotation_stage,
+                status="success",
+                message="Generated visual annotations and structured paper notes.",
+                outputs={
+                    "annotation_count": len(annotations),
+                    "structured_note_count": sum(len(value) for value in structured_notes.values() if isinstance(value, list)),
+                    "research_question_count": len(annotation_result.get("research_questions") or []),
+                },
+            )
         annotation_json_path = annotated_pdf_path.with_name("annotations.json")
         annotation_json_path.write_text(
             json.dumps(
@@ -2672,6 +2963,9 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
                     "objective_title": request.objective_title,
                     "annotations": [item.model_dump() for item in annotations],
                     "insights": annotation_result.get("insights") or [],
+                    "passage_insights": passage_insights,
+                    "structured_notes": structured_notes,
+                    "scientific_pdf_parse": parser_context,
                     "research_questions": annotation_result.get("research_questions") or [],
                     "source_pdf_url": download.get("source_pdf_url"),
                 },
@@ -2689,12 +2983,15 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
                 "pmid": download.get("pmid"),
                 "pmcid": download.get("pmcid"),
                 "annotations": len(annotations),
+                "structured_note_count": sum(len(value) for value in structured_notes.values() if isinstance(value, list)),
                 "visual_annotations": bool(annotation_result.get("visual_annotations")),
+                "workflow_mode": request.workflow_mode,
+                "workflow_trace": [item.model_dump() for item in (workflow_logger.trace if workflow_logger else [])],
             },
         )
         return PreparePaperPdfResponse(
             status="success",
-            message=f"Prepared annotated PDF with {len(annotations)} query/objective-matched passage notes.",
+            message=f"Prepared annotated PDF with {len(annotations)} highlighted passages and structured paper notes.",
             paper_id=paper_id,
             pmid=download.get("pmid") or ids.get("pmid") or None,
             pmcid=download.get("pmcid") or ids.get("pmcid") or None,
@@ -2704,11 +3001,27 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
             annotated_pdf_url=f"/api/projects/{project_id}/literature/pdf/{paper_id}/annotated",
             annotations=annotations,
             insights=[str(item) for item in (annotation_result.get("insights") or [])],
+            passage_insights=passage_insights,
+            structured_notes=structured_notes,
             research_questions=[str(item) for item in (annotation_result.get("research_questions") or [])],
             visual_annotations=bool(annotation_result.get("visual_annotations")),
+            workflow_trace=workflow_logger.trace if workflow_logger else [],
         )
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"PDF preparation failed: {exc}") from exc
+        if workflow_logger:
+            workflow_logger.record(
+                "pdf_preparation_failed",
+                status="error",
+                message="PDF preparation failed.",
+                errors=[str(exc)],
+            )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": f"PDF preparation failed: {exc}",
+                "workflow_trace": [item.model_dump() for item in (workflow_logger.trace if workflow_logger else [])],
+            },
+        ) from exc
 
 
 @app.get("/api/projects/{project_id}/literature/pdf/{paper_id}/annotated")
@@ -3128,6 +3441,7 @@ def _fallback_tacit_memory(request: InferWorkspaceMemoryRequest) -> InferWorkspa
     state = request.explicit_state or {}
     objective = state.get("selected_objective") or {}
     answers = state.get("objective_answers") or state.get("clarifying_answers") or {}
+    questions = _fallback_tacit_elicitation_questions(state)
     items = []
     if objective:
         items.append(
@@ -3161,8 +3475,148 @@ def _fallback_tacit_memory(request: InferWorkspaceMemoryRequest) -> InferWorkspa
         )
     return InferWorkspaceMemoryResponse(
         tacit_state=items,
+        elicitation_questions=questions,
         handoff_summary="Use the saved explicit state and confirmed tacit state as the starting context for future collaborators or onboarding.",
     )
+
+
+def _slug_id(prefix: str, value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")[:72]
+    return f"{prefix}_{slug}" if slug else f"{prefix}_item"
+
+
+def _flatten_strings(value: Any, limit: int = 80) -> List[str]:
+    out: List[str] = []
+
+    def visit(item: Any):
+        if len(out) >= limit:
+            return
+        if isinstance(item, str):
+            text = re.sub(r"\s+", " ", item).strip()
+            if text:
+                out.append(text)
+        elif isinstance(item, dict):
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    seen = set()
+    unique = []
+    for text in out:
+        key = text.lower()[:160]
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(text)
+    return unique[:limit]
+
+
+def _question_from_signal(
+    *,
+    category: str,
+    question: str,
+    why_it_matters: str,
+    evidence_refs: List[str],
+    priority: str = "medium",
+    suggested_owner: Optional[str] = None,
+) -> TacitElicitationQuestion:
+    return TacitElicitationQuestion(
+        id=_slug_id(f"elicit_{category}", question),
+        category=category,
+        question=question,
+        why_it_matters=why_it_matters,
+        evidence_refs=[item for item in evidence_refs if item][:4],
+        priority=priority,
+        suggested_owner=suggested_owner,
+    )
+
+
+def _fallback_tacit_elicitation_questions(explicit_state: Dict[str, Any]) -> List[TacitElicitationQuestion]:
+    text_items = _flatten_strings(explicit_state, limit=120)
+    text = "\n".join(text_items).lower()
+    selected_project = explicit_state.get("selected_project") if isinstance(explicit_state.get("selected_project"), dict) else {}
+    persona = explicit_state.get("persona")
+    owner = str(persona or "").strip() or None
+    project_goal = str(selected_project.get("project_goal") or explicit_state.get("query") or "the current project")
+    questions: List[TacitElicitationQuestion] = []
+
+    if any(term in text for term in ["transfer", "analog", "similar", "host", "strain", "saccharomyces", "yeast"]):
+        questions.append(
+            _question_from_signal(
+                category="transferability",
+                question="Which literature examples should be treated as directly transferable to this host and target product, and which are only loose analogies?",
+                why_it_matters="Transferability assumptions determine whether papers become experiment inputs or just background context.",
+                evidence_refs=[item for item in text_items if re.search(r"transfer|analog|host|strain|yeast|saccharomyces", item, re.IGNORECASE)][:4],
+                priority="high",
+                suggested_owner=owner,
+            )
+        )
+    if any(term in text for term in ["budget", "time", "capability", "infeasible", "expensive", "lab", "constraint"]):
+        questions.append(
+            _question_from_signal(
+                category="feasibility",
+                question="Which methods or validation tracks are outside the lab's current capability, time window, or budget?",
+                why_it_matters="Feasibility redlines prevent the system from proposing scientifically attractive but unusable next steps.",
+                evidence_refs=[item for item in text_items if re.search(r"budget|time|capability|infeasible|expensive|lab|constraint", item, re.IGNORECASE)][:4],
+                priority="high",
+                suggested_owner=owner,
+            )
+        )
+    if any(term in text for term in ["titer", "yield", "productivity", "fold", "g/l", "mg/l", "assay", "measurement"]):
+        questions.append(
+            _question_from_signal(
+                category="evidence_trust",
+                question="Which reported benchmarks should count as decision-grade evidence, and which need assay or condition normalization first?",
+                why_it_matters="Biotech papers often report incompatible metrics; tacit judgment is needed before comparing titers, yields, and fold changes.",
+                evidence_refs=[item for item in text_items if re.search(r"titer|yield|productivity|fold|g/l|mg/l|assay|measurement", item, re.IGNORECASE)][:4],
+                priority="high",
+                suggested_owner=owner,
+            )
+        )
+    if any(term in text for term in ["gap", "unknown", "uncertain", "bottleneck", "limitation", "remain"]):
+        questions.append(
+            _question_from_signal(
+                category="validation",
+                question="Which open uncertainty would most reduce project risk if validated next?",
+                why_it_matters="Prioritizing one uncertainty turns broad gap analysis into an actionable validation path.",
+                evidence_refs=[item for item in text_items if re.search(r"gap|unknown|uncertain|bottleneck|limitation|remain", item, re.IGNORECASE)][:4],
+                priority="high",
+                suggested_owner=owner,
+            )
+        )
+    if any(term in text for term in ["objective", "selected", "goal", "priority", "proposal", "plan"]):
+        questions.append(
+            _question_from_signal(
+                category="constraints",
+                question=f"What decision should the next answer unlock for {project_goal}, and what should it explicitly avoid optimizing for?",
+                why_it_matters="A clear decision boundary improves retrieval, paper annotation, gap ranking, and proposal generation.",
+                evidence_refs=[item for item in text_items if re.search(r"objective|selected|goal|priority|proposal|plan", item, re.IGNORECASE)][:4],
+                priority="medium",
+                suggested_owner=owner,
+            )
+        )
+    questions.append(
+        _question_from_signal(
+            category="handoff",
+            question="What would a new collaborator need to know to avoid repeating a bad assumption in this project?",
+            why_it_matters="This captures tacit negative knowledge that is rarely present in papers but strongly affects project quality.",
+            evidence_refs=[project_goal],
+            priority="medium",
+            suggested_owner=owner,
+        )
+    )
+
+    deduped: List[TacitElicitationQuestion] = []
+    seen = set()
+    for item in questions:
+        if item.id in seen:
+            continue
+        seen.add(item.id)
+        deduped.append(item)
+    return deduped[:8]
 
 
 @app.get("/api/workspace-memory/{workspace_key}", response_model=WorkspaceMemoryResponse)
@@ -3204,6 +3658,8 @@ Rules:
 - Return strict JSON only.
 - Do not invent facts. Every inference needs evidence from the explicit state.
 - Prefer concise items that would help onboard a new hire if the original user leaves.
+- Create elicitation questions for tacit judgments that would materially change retrieval, paper interpretation, gap priority, validation, or proposal design.
+- Questions should target hidden scientific judgment: transferability, feasibility, constraints, evidence trust, validation priority, or handoff risk.
 - Mark uncertain items with lower confidence.
 - Keep ids stable snake_case.
 
@@ -3226,16 +3682,42 @@ Return:
       "reviewer_note": null
     }}
   ],
+  "elicitation_questions": [
+    {{
+      "id": "stable_snake_case_id",
+      "category": "transferability|feasibility|constraints|evidence_trust|validation|handoff",
+      "question": "targeted question for the scientist",
+      "why_it_matters": "how the answer changes system behavior or research quality",
+      "evidence_refs": ["specific signal from explicit state"],
+      "suggested_owner": "collaborator/persona if obvious, otherwise null",
+      "priority": "low|medium|high"
+    }}
+  ],
   "handoff_summary": "short onboarding-oriented summary of the current workspace state"
 }}
 """.strip()
     try:
         response_data = await ollama.generate_json(prompt, max_retries=2, temperature=0.2, top_p=0.9)
         items = [TacitMemoryItem.model_validate(item) for item in response_data.get("tacit_state", [])]
+        raw_questions = response_data.get("elicitation_questions", []) if isinstance(response_data, dict) else []
+        questions = []
+        for item in raw_questions:
+            if not isinstance(item, dict):
+                continue
+            try:
+                questions.append(TacitElicitationQuestion.model_validate(item))
+            except Exception:
+                continue
+        fallback_questions = _fallback_tacit_elicitation_questions(request.explicit_state or {})
+        existing_question_ids = {item.id for item in questions}
+        for item in fallback_questions:
+            if item.id not in existing_question_ids:
+                questions.append(item)
+                existing_question_ids.add(item.id)
         handoff_summary = str(response_data.get("handoff_summary") or "").strip()
-        if not items and not handoff_summary:
+        if not items and not handoff_summary and not questions:
             return _fallback_tacit_memory(request)
-        return InferWorkspaceMemoryResponse(tacit_state=items[:12], handoff_summary=handoff_summary)
+        return InferWorkspaceMemoryResponse(tacit_state=items[:12], elicitation_questions=questions[:10], handoff_summary=handoff_summary)
     except Exception:
         return _fallback_tacit_memory(request)
 
@@ -3248,6 +3730,194 @@ async def log_event(request: LogEventRequest):
         return {"status": "logged"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to log event: {str(e)}") from e
+
+
+def _safe_json_dump(path: Path, payload: Any):
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
+def _read_sql_table(table_name: str, project_id: Optional[int] = None, limit: int = 5000) -> List[Dict[str, Any]]:
+    allowed_tables = {
+        "events",
+        "feedback",
+        "projects",
+        "project_query_sessions",
+        "project_workspace_state",
+        "project_execution_runs",
+        "project_execution_events",
+        "reports",
+        "render_jobs",
+        "personas",
+        "workspace_memory",
+        "ontology_nodes",
+        "ontology_edges",
+        "ontology_sync_runs",
+    }
+    if table_name not in allowed_tables:
+        return []
+
+    conn = db._connect()
+    cursor = conn.cursor()
+    try:
+        if project_id is not None and table_name == "projects":
+            cursor.execute("SELECT * FROM projects WHERE id = ? ORDER BY rowid DESC LIMIT ?", (project_id, limit))
+        elif project_id is not None and table_name in {
+            "project_query_sessions",
+            "project_workspace_state",
+            "project_execution_runs",
+            "ontology_nodes",
+            "ontology_edges",
+            "ontology_sync_runs",
+        }:
+            cursor.execute(f"SELECT * FROM {table_name} WHERE project_id = ? ORDER BY rowid DESC LIMIT ?", (project_id, limit))
+        elif project_id is not None and table_name == "events":
+            rows = db.list_project_events(project_id, limit=limit)
+            conn.close()
+            return rows
+        elif project_id is not None and table_name == "project_execution_events":
+            cursor.execute(
+                """
+                SELECT e.*
+                FROM project_execution_events e
+                JOIN project_execution_runs r ON r.id = e.run_id
+                WHERE r.project_id = ?
+                ORDER BY e.id DESC
+                LIMIT ?
+                """,
+                (project_id, limit),
+            )
+        else:
+            cursor.execute(f"SELECT * FROM {table_name} ORDER BY rowid DESC LIMIT ?", (limit,))
+        rows = [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+    for row in rows:
+        for key, value in list(row.items()):
+            if isinstance(value, str) and key.endswith(("_json", "payload")):
+                try:
+                    row[key] = json.loads(value)
+                except Exception:
+                    pass
+    return rows
+
+
+def _add_tree_to_zip(zipf: zipfile.ZipFile, root: Path, archive_prefix: str, include_pdfs: bool):
+    if not root.exists():
+        return
+    for file_path in root.rglob("*"):
+        if not file_path.is_file():
+            continue
+        if not include_pdfs and file_path.suffix.lower() == ".pdf":
+            continue
+        try:
+            zipf.write(file_path, f"{archive_prefix}/{file_path.relative_to(root).as_posix()}")
+        except Exception:
+            continue
+
+
+@app.get("/api/diagnostics/export")
+async def export_diagnostics(
+    background_tasks: BackgroundTasks,
+    project_id: Optional[int] = Query(default=None),
+    include_pdfs: bool = Query(default=True),
+):
+    """Export a user-initiated diagnostics bundle for stakeholder trial debugging."""
+    try:
+        export_dir = Path(tempfile.mkdtemp(prefix="seci_diagnostics_"))
+        bundle_path = export_dir / "seci-persona-studio-diagnostics.zip"
+        generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+        await log_event_safe(
+            "diagnostics_export_requested",
+            {
+                "project_id": project_id,
+                "include_pdfs": include_pdfs,
+                "generated_at": generated_at,
+            },
+        )
+
+        manifest = {
+            "app": "SECI Persona Studio",
+            "generated_at": generated_at,
+            "project_id": project_id,
+            "include_pdfs": include_pdfs,
+            "python": sys.version,
+            "platform": platform.platform(),
+            "database_path": str(Path(db.db_path).resolve()),
+            "cwd": str(Path.cwd().resolve()),
+            "environment": {
+                "DATABASE_PATH": os.getenv("DATABASE_PATH"),
+                "APP_CONFIG_PATH": os.getenv("APP_CONFIG_PATH"),
+                "OLLAMA_BASE_URL": os.getenv("OLLAMA_BASE_URL"),
+                "OLLAMA_URL": os.getenv("OLLAMA_URL"),
+                "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL"),
+                "PAPER_EVIDENCE_ROOT": os.getenv("PAPER_EVIDENCE_ROOT"),
+            },
+            "notes": [
+                "This bundle is created only when a user clicks Export Diagnostics.",
+                "It may contain project text, literature queries, annotations, local event logs, and feedback notes.",
+            ],
+        }
+
+        tables = {
+            name: _read_sql_table(name, project_id=project_id)
+            for name in [
+                "events",
+                "feedback",
+                "projects",
+                "project_query_sessions",
+                "project_workspace_state",
+                "project_execution_runs",
+                "project_execution_events",
+                "reports",
+                "render_jobs",
+                "personas",
+                "workspace_memory",
+                "ontology_nodes",
+                "ontology_edges",
+                "ontology_sync_runs",
+            ]
+        }
+
+        with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
+            manifest_path = export_dir / "manifest.json"
+            _safe_json_dump(manifest_path, manifest)
+            zipf.write(manifest_path, "manifest.json")
+
+            for table_name, rows in tables.items():
+                table_path = export_dir / f"{table_name}.json"
+                _safe_json_dump(table_path, rows)
+                zipf.write(table_path, f"database_exports/{table_name}.json")
+
+            db_path = Path(db.db_path)
+            if db_path.exists():
+                zipf.write(db_path, f"raw/{db_path.name}")
+
+            config_path = os.getenv("APP_CONFIG_PATH")
+            if config_path and Path(config_path).exists():
+                zipf.write(Path(config_path), "runtime/app-config.json")
+
+            evidence_root = Path(os.getenv("PAPER_EVIDENCE_ROOT") or "data/paper_evidence")
+            if project_id is not None:
+                _add_tree_to_zip(zipf, evidence_root / f"project_{project_id}", f"paper_evidence/project_{project_id}", include_pdfs)
+            else:
+                _add_tree_to_zip(zipf, evidence_root, "paper_evidence", include_pdfs)
+
+            data_root = Path("data")
+            for relative in ["reports", "qmd_reports", "context"]:
+                _add_tree_to_zip(zipf, data_root / relative, f"runtime_data/{relative}", include_pdfs=False)
+
+        background_tasks.add_task(shutil.rmtree, export_dir, True)
+        filename = f"seci-diagnostics-{generated_at.replace(':', '').replace('-', '')}.zip"
+        return FileResponse(
+            bundle_path,
+            media_type="application/zip",
+            filename=filename,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to export diagnostics: {str(e)}") from e
 
 
 @app.post("/api/feedback", response_model=FeedbackResponse)

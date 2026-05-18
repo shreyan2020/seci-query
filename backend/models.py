@@ -111,6 +111,23 @@ class TacitMemoryItem(BaseModel):
     reviewer_note: Optional[str] = None
 
 
+class TacitElicitationQuestion(BaseModel):
+    id: str
+    category: Literal[
+        "transferability",
+        "feasibility",
+        "constraints",
+        "evidence_trust",
+        "validation",
+        "handoff",
+    ]
+    question: str
+    why_it_matters: str = ""
+    evidence_refs: List[str] = Field(default_factory=list)
+    suggested_owner: Optional[str] = None
+    priority: Literal["low", "medium", "high"] = "medium"
+
+
 class WorkspaceMemory(BaseModel):
     workspace_key: str
     scope: str = "default"
@@ -140,6 +157,7 @@ class InferWorkspaceMemoryRequest(BaseModel):
 
 class InferWorkspaceMemoryResponse(BaseModel):
     tacit_state: List[TacitMemoryItem] = Field(default_factory=list)
+    elicitation_questions: List[TacitElicitationQuestion] = Field(default_factory=list)
     handoff_summary: str = ""
 
 
@@ -775,6 +793,16 @@ class ResearchGap(BaseModel):
     priority_note: str = ""
 
 
+class CrossPaperSynthesis(BaseModel):
+    summary: str = ""
+    evidence_matrix: List[Dict[str, Any]] = Field(default_factory=list)
+    consensus_patterns: List[str] = Field(default_factory=list)
+    contradictions_or_tensions: List[str] = Field(default_factory=list)
+    transferability_assumptions: List[str] = Field(default_factory=list)
+    gap_rationale: List[str] = Field(default_factory=list)
+    validation_priorities: List[str] = Field(default_factory=list)
+
+
 class JudgmentCall(BaseModel):
     id: str
     stance: str = ""
@@ -816,6 +844,8 @@ class ResearchWorkTemplate(BaseModel):
 class FetchProjectLiteratureRequest(BaseModel):
     persona_id: int
     query: str
+    workflow_mode: Literal["legacy", "sota"] = "legacy"
+    query_variant_count: int = 8
     objective_id: Optional[str] = None
     objective_title: Optional[str] = None
     objective_definition: Optional[str] = None
@@ -849,6 +879,7 @@ class SynthesizeLiteratureGapsRequest(BaseModel):
 class SynthesizeLiteratureGapsResponse(BaseModel):
     gaps: List[ResearchGap] = Field(default_factory=list)
     synthesis_summary: str = ""
+    cross_paper_synthesis: CrossPaperSynthesis = Field(default_factory=CrossPaperSynthesis)
 
 
 class RunValidationTrackRequest(BaseModel):
@@ -873,12 +904,32 @@ class LiteratureToolTrace(BaseModel):
     error_message: Optional[str] = None
 
 
+class WorkflowStageTrace(BaseModel):
+    run_id: str = ""
+    stage: str
+    status: Literal[
+        "success",
+        "success_with_warnings",
+        "skipped",
+        "missing_capability",
+        "error",
+    ] = "success"
+    message: str = ""
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    duration_ms: Optional[float] = None
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    outputs: Dict[str, Any] = Field(default_factory=dict)
+    errors: List[str] = Field(default_factory=list)
+
+
 class FetchProjectLiteratureResponse(BaseModel):
     findings: List[ResearchFinding] = Field(default_factory=list)
     tool_trace: LiteratureToolTrace
     objective_lens: Optional[str] = None
     processing_summary: str = ""
     elicitation_questions: List[str] = Field(default_factory=list)
+    workflow_trace: List[WorkflowStageTrace] = Field(default_factory=list)
 
 
 class PaperAnnotation(BaseModel):
@@ -889,10 +940,20 @@ class PaperAnnotation(BaseModel):
     score: float = 0.0
 
 
+class PaperStructuredNotes(BaseModel):
+    evidence_claims: List[str] = Field(default_factory=list)
+    methods: List[str] = Field(default_factory=list)
+    quantitative_benchmarks: List[str] = Field(default_factory=list)
+    limitations: List[str] = Field(default_factory=list)
+    transferability_notes: List[str] = Field(default_factory=list)
+    research_gaps: List[str] = Field(default_factory=list)
+
+
 class PreparePaperPdfRequest(BaseModel):
     persona_id: int
     finding: ResearchFinding
     query: str
+    workflow_mode: Literal["legacy", "sota"] = "legacy"
     project_goal: Optional[str] = None
     project_end_product: Optional[str] = None
     project_target_host: Optional[str] = None
@@ -917,8 +978,11 @@ class PreparePaperPdfResponse(BaseModel):
     annotated_pdf_url: Optional[str] = None
     annotations: List[PaperAnnotation] = Field(default_factory=list)
     insights: List[str] = Field(default_factory=list)
+    passage_insights: List[str] = Field(default_factory=list)
+    structured_notes: PaperStructuredNotes = Field(default_factory=PaperStructuredNotes)
     research_questions: List[str] = Field(default_factory=list)
     visual_annotations: bool = False
+    workflow_trace: List[WorkflowStageTrace] = Field(default_factory=list)
 
 
 class GenerateProjectPlanRequest(BaseModel):

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { API_BASE } from '@/features/biotech-workspace/lib/api-base';
 
 type ReportStatus = 'draft' | 'queued' | 'running' | 'success' | 'failed';
 
@@ -27,8 +28,6 @@ interface PersonaItem {
   scope: string;
   last_summary: string;
 }
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 async function fetchReport(id: string): Promise<ReportMeta> {
   const res = await fetch(`${API_BASE}/api/reports/${id}`, { cache: 'no-store' });

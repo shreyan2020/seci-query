@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 
 import { fetchProjectJourney } from '@/features/biotech-workspace/lib/api';
 import { classNames } from '@/features/biotech-workspace/lib/utils';
@@ -19,7 +19,7 @@ function formatTime(value: string) {
   return date.toLocaleString();
 }
 
-export default function ProjectJourneyPage() {
+function ProjectJourneyContent() {
   const searchParams = useSearchParams();
   const projectIdRaw = searchParams.get('projectId') || '';
   const projectId = Number(projectIdRaw);
@@ -245,5 +245,13 @@ export default function ProjectJourneyPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function ProjectJourneyPage() {
+  return (
+    <Suspense fallback={<main className="min-h-screen bg-slate-950 p-8 text-white">Loading project journey...</main>}>
+      <ProjectJourneyContent />
+    </Suspense>
   );
 }

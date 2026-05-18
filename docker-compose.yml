@@ -11,8 +11,6 @@ services:
             - driver: nvidia
               capabilities: ["gpu"]
               count: all
-    ports:
-      - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
@@ -34,13 +32,15 @@ services:
       dockerfile: Dockerfile
     container_name: dsm-backend
     ports:
-      - "8000:8000"
+      - "${BACKEND_BIND:-0.0.0.0}:${BACKEND_PORT:-8000}:8000"
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_URL=http://ollama:11434
       - DATABASE_PATH=/data/dsm.db
       - ARTIFACT_ROOT=/data/artifacts
       - PERSONA_ROOT=/data/personas
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b-instruct}
       - PYTHONUNBUFFERED=1
     depends_on:
       - ollama
@@ -66,6 +66,7 @@ services:
       - DATABASE_PATH=/data/dsm.db
       - ARTIFACT_ROOT=/data/artifacts
       - PERSONA_ROOT=/data/personas
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b-instruct}
       - WORKER_POLL_SECONDS=2
       - RENDER_TIMEOUT_SECONDS=180
       - PYTHONUNBUFFERED=1
@@ -83,12 +84,14 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: http://localhost:8000
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+        NEXT_PUBLIC_API_PORT: ${BACKEND_PORT:-8000}
     container_name: dsm-frontend
     ports:
-      - "3000:3000"
+      - "${FRONTEND_BIND:-0.0.0.0}:${FRONTEND_PORT:-3000}:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+      - NEXT_PUBLIC_API_PORT=${BACKEND_PORT:-8000}
       - NODE_ENV=production
     depends_on:
       - backend

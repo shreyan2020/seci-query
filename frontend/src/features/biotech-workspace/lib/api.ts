@@ -21,8 +21,9 @@ import type {
   ProjectWorkspaceResponse,
   WorkspaceMemoryResponse,
 } from '@/features/biotech-workspace/types';
+import { API_BASE } from './api-base';
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+export { API_BASE };
 
 export async function fetchProjects(): Promise<ProjectsResponse> {
   const response = await fetch(`${API_BASE}/api/projects`, { cache: 'no-store' });
@@ -340,6 +341,24 @@ export async function inferWorkspaceMemory(payload: {
     throw new Error(err.detail || 'Failed to infer workspace memory');
   }
   return response.json();
+}
+
+export function diagnosticsExportUrl(payload: { project_id?: number; include_pdfs?: boolean } = {}): string {
+  const params = new URLSearchParams();
+  if (payload.project_id) params.set('project_id', String(payload.project_id));
+  if (payload.include_pdfs !== undefined) params.set('include_pdfs', String(payload.include_pdfs));
+  const query = params.toString();
+  return `${API_BASE}/api/diagnostics/export${query ? `?${query}` : ''}`;
+}
+
+export async function exportDiagnostics(payload: { project_id?: number; include_pdfs?: boolean } = {}): Promise<Blob> {
+  const url = diagnosticsExportUrl(payload);
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to export diagnostics');
+  }
+  return response.blob();
 }
 
 export async function fetchOntologyPreview(

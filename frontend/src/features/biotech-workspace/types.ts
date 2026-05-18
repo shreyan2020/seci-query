@@ -179,6 +179,16 @@ export interface ResearchGap {
   priority_note: string;
 }
 
+export interface CrossPaperSynthesis {
+  summary: string;
+  evidence_matrix: Record<string, unknown>[];
+  consensus_patterns: string[];
+  contradictions_or_tensions: string[];
+  transferability_assumptions: string[];
+  gap_rationale: string[];
+  validation_priorities: string[];
+}
+
 export interface JudgmentCall {
   id: string;
   stance: string;
@@ -236,6 +246,7 @@ export interface FetchProjectLiteratureResponse {
 export interface SynthesizeLiteratureGapsResponse {
   gaps: ResearchGap[];
   synthesis_summary: string;
+  cross_paper_synthesis: CrossPaperSynthesis;
 }
 
 export interface PaperAnnotation {
@@ -244,6 +255,15 @@ export interface PaperAnnotation {
   reason: string;
   matched_terms: string[];
   score: number;
+}
+
+export interface PaperStructuredNotes {
+  evidence_claims: string[];
+  methods: string[];
+  quantitative_benchmarks: string[];
+  limitations: string[];
+  transferability_notes: string[];
+  research_gaps: string[];
 }
 
 export interface PreparePaperPdfResponse {
@@ -258,6 +278,8 @@ export interface PreparePaperPdfResponse {
   annotated_pdf_url?: string | null;
   annotations: PaperAnnotation[];
   insights: string[];
+  passage_insights: string[];
+  structured_notes: PaperStructuredNotes;
   research_questions: string[];
   visual_annotations: boolean;
 }
@@ -270,6 +292,16 @@ export interface TacitMemoryItem {
   confidence: number;
   status: 'inferred' | 'confirmed' | 'rejected' | 'edited';
   reviewer_note?: string | null;
+}
+
+export interface TacitElicitationQuestion {
+  id: string;
+  category: 'transferability' | 'feasibility' | 'constraints' | 'evidence_trust' | 'validation' | 'handoff';
+  question: string;
+  why_it_matters: string;
+  evidence_refs: string[];
+  suggested_owner?: string | null;
+  priority: 'low' | 'medium' | 'high';
 }
 
 export interface WorkspaceMemory {
@@ -287,6 +319,7 @@ export interface WorkspaceMemoryResponse {
 
 export interface InferWorkspaceMemoryResponse {
   tacit_state: TacitMemoryItem[];
+  elicitation_questions: TacitElicitationQuestion[];
   handoff_summary: string;
 }
 

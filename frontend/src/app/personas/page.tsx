@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { API_BASE } from '@/features/biotech-workspace/lib/api-base';
 
 interface Persona {
   id: number;
@@ -27,8 +28,6 @@ interface PersonaChangeLogItem {
   reasons: string[];
   supporting_events: Record<string, number>;
 }
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(' ');

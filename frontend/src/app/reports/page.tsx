@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { API_BASE } from '@/features/biotech-workspace/lib/api-base';
 
 interface Report {
   id: number;
@@ -10,8 +11,6 @@ interface Report {
   status: string;
   updated_at: string;
 }
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export default function ReportsPage() {
   const [reports, setReports] = useState<Report[]>([]);

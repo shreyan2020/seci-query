@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 
 import { ModeBackdrop } from '@/features/biotech-workspace/components/ModeBackdrop';
 import { ObjectiveClusteringSection } from '@/features/biotech-workspace/components/ObjectiveClusteringSection';
@@ -21,6 +21,7 @@ import {
   createProjectCollaborator,
   createProjectQuery,
   deleteProject,
+  diagnosticsExportUrl,
   fetchExecutionRun,
   fetchLatestExecutionRun,
   fetchStoredOntology,
@@ -65,6 +66,7 @@ import type {
   ResearchFinding,
   ResearchWorkTemplate,
   StatusState,
+  TacitElicitationQuestion,
   TacitMemoryItem,
 } from '@/features/biotech-workspace/types';
 
@@ -143,7 +145,39 @@ declare global {
   }
 }
 
-export default function BiotechProjectWorkspace() {
+function compactStatus(status: StatusState | null) {
+  if (!status) return null;
+  const message = status.message || '';
+  if (/search_literature returned/i.test(message)) {
+    return { ...status, message: 'Literature library updated.' };
+  }
+  if (/Fetching literature with/i.test(message)) {
+    return { ...status, message: 'Searching literature...' };
+  }
+  if (/Fetched \d+ new literature/i.test(message)) {
+    return { ...status, message: 'Literature evidence refreshed.' };
+  }
+  return status;
+}
+
+function InlineWorkspaceStatus({ status }: { status: StatusState | null }) {
+  const visibleStatus = compactStatus(status);
+  if (!visibleStatus) return null;
+  return (
+    <div
+      className={classNames(
+        'rounded-2xl border px-4 py-3 text-sm shadow-sm',
+        visibleStatus.type === 'success' && 'border-emerald-200 bg-emerald-50 text-emerald-900',
+        visibleStatus.type === 'error' && 'border-rose-200 bg-rose-50 text-rose-900',
+        visibleStatus.type === 'info' && 'border-sky-200 bg-sky-50 text-sky-900'
+      )}
+    >
+      {visibleStatus.message}
+    </div>
+  );
+}
+
+function BiotechProjectWorkspaceContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const routeProjectIdRaw = searchParams.get('projectId') || '';
@@ -207,12 +241,15 @@ export default function BiotechProjectWorkspace() {
   const [objectivePickerCollapsed, setObjectivePickerCollapsed] = useState(false);
   const [workspaceReadyForSave, setWorkspaceReadyForSave] = useState(false);
   const [tacitState, setTacitState] = useState<TacitMemoryItem[]>([]);
+  const [tacitElicitationQuestions, setTacitElicitationQuestions] = useState<TacitElicitationQuestion[]>([]);
+  const [tacitElicitationAnswers, setTacitElicitationAnswers] = useState<Record<string, string>>({});
   const [handoffSummary, setHandoffSummary] = useState('');
   const [memoryStatus, setMemoryStatus] = useState('not saved yet');
   const [inferringMemory, setInferringMemory] = useState(false);
   const [ontologyPreview, setOntologyPreview] = useState<OntologyPreviewResponse | null>(null);
   const [ontologyStatus, setOntologyStatus] = useState('not mapped yet');
   const [loadingOntology, setLoadingOntology] = useState(false);
+  const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
   const [status, setStatus] = useState<StatusState | null>(null);
   const querySectionRef = useRef<HTMLDivElement | null>(null);
   const objectiveSectionRef = useRef<HTMLDivElement | null>(null);
@@ -236,6 +273,8 @@ export default function BiotechProjectWorkspace() {
   const pdfViewerFinding = pdfViewer
     ? researchWorkTemplate.literature_findings.find((finding) => finding.id === pdfViewer.findingId) || null
     : null;
+  const activeProjectQuery =
+    activeQueryId === '' ? null : projectQueries.find((query) => query.id === Number(activeQueryId)) || null;
   const workingQuestionText = focusQuestion.trim() || selectedProject?.project_goal || '';
   const selectedObjectiveLens = selectedObjective
     ? [selectedObjective.title, selectedObjective.definition, ...selectedObjective.signals].join(' ')
@@ -276,6 +315,8 @@ export default function BiotechProjectWorkspace() {
         elicitation_answers: literatureElicitationAnswers,
         review_stage: literatureReviewStage,
       },
+      tacit_elicitation_questions: tacitElicitationQuestions,
+      tacit_elicitation_answers: tacitElicitationAnswers,
       agentic_plan: agenticPlan,
       selected_plan_step_id: selectedPlanStepId,
       execution_run: executionRun,
@@ -296,6 +337,8 @@ export default function BiotechProjectWorkspace() {
       literatureElicitationQuestions,
       literatureElicitationAnswers,
       literatureReviewStage,
+      tacitElicitationQuestions,
+      tacitElicitationAnswers,
       agenticPlan,
       selectedPlanStepId,
       executionRun,
@@ -404,6 +447,22 @@ export default function BiotechProjectWorkspace() {
     const trimmed = query.trim();
     return trimmed ? trimmed.slice(0, 72) : fallback;
   };
+  const queryTextFromSession = (query: ProjectQuerySession) => {
+    const template = query.state?.research_work_template as Partial<ResearchWorkTemplate> | undefined;
+    const templateQuery = typeof template?.initial_query === 'string' ? template.initial_query.trim() : '';
+    const titleQuery = query.title && query.title !== 'Untitled query' ? query.title.trim() : '';
+    return query.query.trim() || templateQuery || titleQuery;
+  };
+  const workTemplateFromSession = (query: ProjectQuerySession, restoredQuery: string) => {
+    const template = query.state?.research_work_template as ResearchWorkTemplate | undefined;
+    if (!template) {
+      return createEmptyResearchWorkTemplate(restoredQuery);
+    }
+    if (template.initial_query?.trim()) {
+      return template;
+    }
+    return { ...template, initial_query: restoredQuery };
+  };
   const currentQueryState = (): Record<string, unknown> => ({
     selected_persona_id: selectedPersonaId === '' ? null : Number(selectedPersonaId),
     active_flow_step: activeFlowStep,
@@ -426,7 +485,8 @@ export default function BiotechProjectWorkspace() {
   const restoreQueryState = (query: ProjectQuerySession) => {
     const state = query.state || {};
     const personaId = typeof state.selected_persona_id === 'number' ? state.selected_persona_id : '';
-    setFocusQuestion(query.query || '');
+    const restoredQuery = queryTextFromSession(query);
+    setFocusQuestion(restoredQuery);
     setSelectedPersonaId(personaId);
     setActiveFlowStep((state.active_flow_step as FlowStep) || (personaId === '' ? 'collaborator' : 'query'));
     setCollaboratorPickerCollapsed(Boolean(personaId));
@@ -437,7 +497,7 @@ export default function BiotechProjectWorkspace() {
     setGlobalQuestionAnswers((state.global_question_answers as Record<string, string>) || {});
     setClarifyingAnswers((state.clarifying_answers as Record<string, string>) || {});
     setReasoningNotes(typeof state.reasoning_notes === 'string' ? state.reasoning_notes : '');
-    setResearchWorkTemplate((state.research_work_template as ResearchWorkTemplate) || createEmptyResearchWorkTemplate(query.query));
+    setResearchWorkTemplate(workTemplateFromSession(query, restoredQuery));
     setAgenticPlan((state.agentic_plan as AgenticPlan | null) || null);
     setSelectedPlanStepId(typeof state.selected_plan_step_id === 'string' ? state.selected_plan_step_id : '');
     setLiteratureObjectiveLens(typeof state.literature_objective_lens === 'string' ? state.literature_objective_lens : null);
@@ -761,10 +821,14 @@ export default function BiotechProjectWorkspace() {
         if (cancelled) return;
         if (response.memory) {
           setTacitState(response.memory.tacit_state || []);
+          setTacitElicitationQuestions(((response.memory.explicit_state?.tacit_elicitation_questions as TacitElicitationQuestion[]) || []));
+          setTacitElicitationAnswers(((response.memory.explicit_state?.tacit_elicitation_answers as Record<string, string>) || {}));
           setHandoffSummary(response.memory.handoff_summary || '');
           setMemoryStatus(`loaded memory${response.memory.updated_at ? ` from ${new Date(response.memory.updated_at).toLocaleString()}` : ''}`);
         } else {
           setTacitState([]);
+          setTacitElicitationQuestions([]);
+          setTacitElicitationAnswers({});
           setHandoffSummary('');
           setMemoryStatus('new memory record');
         }
@@ -1067,6 +1131,12 @@ export default function BiotechProjectWorkspace() {
 
   const handleReturnToLanding = () => {
     router.push('/');
+    setSelectedProjectId('');
+    setSelectedPersonaId('');
+    setActiveQueryId('');
+    setSelectedObjectiveId('');
+    setActiveFlowStep('collaborator');
+    setStatus(null);
   };
 
   const handleClusterObjectives = async () => {
@@ -1151,8 +1221,17 @@ export default function BiotechProjectWorkspace() {
   };
 
   const handleRefineQuery = () => {
-    setShowNewQueryForm(true);
-    setStatus({ type: 'info', message: 'Use the project query panel to create or switch investigation queries.' });
+    const currentQuery = focusQuestion.trim() || researchWorkTemplate.initial_query.trim() || selectedProject?.project_goal?.trim() || '';
+    if (activeQueryId === '') {
+      setNewQueryText(currentQuery);
+      setShowNewQueryForm(true);
+      setStatus({ type: 'info', message: 'Use the project query panel to create the first investigation query.' });
+      return;
+    }
+    setShowNewQueryForm(false);
+    setActiveFlowStep('query');
+    setStatus({ type: 'info', message: 'Edit the working query for this investigation.' });
+    scrollToSection(querySectionRef);
   };
 
   const handleChooseAnotherCollaborator = () => {
@@ -1484,6 +1563,7 @@ export default function BiotechProjectWorkspace() {
       setResearchWorkTemplate((current) => ({
         ...current,
         common_gaps: response.gaps,
+        synthesis_memo: response.cross_paper_synthesis?.summary || response.synthesis_summary || current.synthesis_memo,
       }));
       logProjectEvent('project_literature_gaps_synthesized', {
         project_id: selectedProject.id,
@@ -1491,6 +1571,8 @@ export default function BiotechProjectWorkspace() {
         persona_id: Number(selectedPersonaId),
         objective_id: selectedObjective?.id,
         gap_count: response.gaps.length,
+        consensus_patterns: response.cross_paper_synthesis?.consensus_patterns || [],
+        transferability_assumptions: response.cross_paper_synthesis?.transferability_assumptions || [],
       }).catch(() => {});
       setStatus({ type: 'success', message: response.synthesis_summary || `Synthesized ${response.gaps.length} literature gap clusters.` });
     } catch (error) {
@@ -1615,8 +1697,7 @@ export default function BiotechProjectWorkspace() {
   };
 
   const handleMoveToProposalSynthesis = () => {
-    setLiteratureReviewStage('proposal');
-    setStatus({ type: 'success', message: 'Literature review finalized. Proposal synthesis is now open.' });
+    return;
   };
 
   const updatePdfViewerFinding = (patch: Partial<ResearchFinding>) => {
@@ -1635,6 +1716,16 @@ export default function BiotechProjectWorkspace() {
     setTacitState((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   };
 
+  const answerTacitElicitationQuestion = (question: string, answer: string) => {
+    setTacitElicitationAnswers((current) => ({ ...current, [question]: answer }));
+    setClarifyingAnswers((current) => {
+      if (!answer.trim()) {
+        return current;
+      }
+      return { ...current, [question]: answer };
+    });
+  };
+
   const handleInferWorkspaceMemory = async () => {
     if (!selectedProject || selectedPersonaId === '') {
       setStatus({ type: 'error', message: 'Open a project and collaborator before inferring workspace memory.' });
@@ -1650,6 +1741,7 @@ export default function BiotechProjectWorkspace() {
         existing_tacit_state: tacitState,
       });
       setTacitState(response.tacit_state || []);
+      setTacitElicitationQuestions(response.elicitation_questions || []);
       setHandoffSummary(response.handoff_summary || '');
       setMemoryStatus('tacit state inferred; saving...');
       syncProjectOntology(selectedProject.id, {
@@ -1828,6 +1920,66 @@ export default function BiotechProjectWorkspace() {
     });
   };
 
+  const handleExportDiagnostics = async () => {
+    if (!selectedProject) return;
+    const issueNote =
+      window.prompt(
+        [
+          'Optional: describe what went wrong or what looked low quality.',
+          'Examples: bad literature query, irrelevant search results, weak annotations, missing evidence, confusing draft.',
+        ].join('\n')
+      ) || '';
+
+    setExportingDiagnostics(true);
+    setStatus({ type: 'info', message: 'Preparing diagnostics bundle...' });
+    try {
+      await logProjectEvent('diagnostics_context_snapshot', {
+        project_id: selectedProject.id,
+        project_name: selectedProject.name,
+        persona_id: selectedPersonaId || null,
+        persona_name: selectedPersona?.name || null,
+        objective_id: selectedObjectiveId || null,
+        objective_title: selectedObjective?.title || null,
+        active_query_id: activeQueryId || null,
+        focus_question: focusQuestion,
+        literature_query: researchWorkTemplate.initial_query,
+        literature_review_stage: literatureReviewStage,
+        literature_findings: researchWorkTemplate.literature_findings.length,
+        annotation_insights: researchWorkTemplate.literature_findings.reduce(
+          (count, finding) => count + (finding.annotation_insights || []).length,
+          0
+        ),
+        issue_note: issueNote.trim() || null,
+        status_message: status?.message || null,
+      }).catch(() => {});
+
+      if (issueNote.trim()) {
+        await logProjectEvent('diagnostics_issue_reported', {
+          project_id: selectedProject.id,
+          project_name: selectedProject.name,
+          persona_id: selectedPersonaId || null,
+          objective_id: selectedObjectiveId || null,
+          focus_question: focusQuestion,
+          literature_query: researchWorkTemplate.initial_query,
+          issue_note: issueNote.trim(),
+        }).catch(() => {});
+      }
+
+      const url = diagnosticsExportUrl({ project_id: selectedProject.id, include_pdfs: true });
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = '';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setStatus({ type: 'success', message: 'Diagnostics download started. Share that zip when reporting the trial issue.' });
+    } catch (error) {
+      setStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to export diagnostics' });
+    } finally {
+      setExportingDiagnostics(false);
+    }
+  };
+
   return (
     <div className={classNames('relative min-h-screen overflow-hidden p-0 text-slate-950 transition-colors duration-700', modePageTone[modeVisualKey] || modePageTone.general)}>
       <ModeBackdrop modeKey={modeVisualKey} />
@@ -1836,9 +1988,11 @@ export default function BiotechProjectWorkspace() {
           selectedProject={Boolean(selectedProject)}
           onReturnToLanding={handleReturnToLanding}
           onOpenMemory={selectedProject ? () => setMemoryDrawerOpen(true) : undefined}
+          onExportDiagnostics={selectedProject ? handleExportDiagnostics : undefined}
+          exportingDiagnostics={exportingDiagnostics}
           journeyHref={selectedProject ? `/journey?projectId=${selectedProject.id}` : undefined}
           memoryItemCount={tacitState.length}
-          status={status}
+          status={null}
         />
 
         {!selectedProject ? (
@@ -1892,28 +2046,7 @@ export default function BiotechProjectWorkspace() {
                     {showNewQueryForm ? 'Hide query form' : 'New query'}
                   </button>
                 </div>
-                {(showNewQueryForm || projectQueries.length === 0) && (
-                  <div className="mt-4 rounded-[1.4rem] border border-slate-200 bg-slate-50 p-4">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Query under this project goal</div>
-                    <textarea
-                      value={newQueryText}
-                      onChange={(event) => setNewQueryText(event.target.value)}
-                      rows={4}
-                      className="mt-3 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900"
-                      placeholder="Working query"
-                    />
-                    <div className="mt-3 flex justify-end">
-                      <button
-                        onClick={handleCreateProjectQuery}
-                        disabled={!newQueryText.trim() || creatingQuery}
-                        className="rounded-2xl bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {creatingQuery ? 'Creating...' : 'Create query and continue'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-                <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
                   {projectQueries.map((query, index) => {
                     const active = query.id === activeQueryId;
                     return (
@@ -1928,7 +2061,9 @@ export default function BiotechProjectWorkspace() {
                         <div className={classNames('text-[10px] font-semibold uppercase tracking-wide', active ? 'text-slate-300' : 'text-slate-500')}>
                           Query {index + 1}
                         </div>
-                        <div className="mt-1 line-clamp-2 text-sm font-semibold">{query.title || 'Untitled query'}</div>
+                        <div className="mt-1 line-clamp-2 text-sm font-semibold">
+                          {query.title && query.title !== 'Untitled query' ? query.title : queryTextFromSession(query) || 'Untitled query'}
+                        </div>
                         <div className={classNames('mt-1 text-[11px]', active ? 'text-slate-300' : 'text-slate-500')}>
                           {new Date(query.updated_at).toLocaleString()}
                         </div>
@@ -1936,7 +2071,45 @@ export default function BiotechProjectWorkspace() {
                     );
                   })}
                 </div>
+                {activeProjectQuery && (
+                  <div className="mt-3 rounded-[1.4rem] border border-slate-200 bg-slate-50 p-4">
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Selected working query</div>
+                      <div className="text-[11px] text-slate-500">Autosaves to Query {projectQueries.findIndex((query) => query.id === activeProjectQuery.id) + 1}</div>
+                    </div>
+                    <textarea
+                      value={focusQuestion}
+                      onChange={(event) => setFocusQuestion(event.target.value)}
+                      rows={4}
+                      className="mt-3 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900"
+                      placeholder="Selected working query"
+                    />
+                  </div>
+                )}
+                {(showNewQueryForm || projectQueries.length === 0) && (
+                  <div className="mt-3 rounded-[1.4rem] border border-dashed border-slate-300 bg-white p-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Create another query</div>
+                    <textarea
+                      value={newQueryText}
+                      onChange={(event) => setNewQueryText(event.target.value)}
+                      rows={4}
+                      className="mt-3 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900"
+                      placeholder="New investigation query"
+                    />
+                    <div className="mt-3 flex justify-end">
+                      <button
+                        onClick={handleCreateProjectQuery}
+                        disabled={!newQueryText.trim() || creatingQuery}
+                        className="rounded-2xl bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {creatingQuery ? 'Creating...' : 'Create query and continue'}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </section>
+
+              <InlineWorkspaceStatus status={status} />
 
               {activeQueryId !== '' && (activeFlowStep === 'collaborator' || activeFlowStep === 'query') && (
                 <div ref={querySectionRef} className="scroll-mt-28">
@@ -2293,10 +2466,13 @@ export default function BiotechProjectWorkspace() {
                   workspaceKey={workspaceMemoryKey}
                   memoryStatus={memoryStatus}
                   tacitState={tacitState}
+                  elicitationQuestions={tacitElicitationQuestions}
+                  elicitationAnswers={tacitElicitationAnswers}
                   handoffSummary={handoffSummary}
                   inferring={inferringMemory}
                   onInfer={handleInferWorkspaceMemory}
                   onUpdateTacitItem={updateTacitItem}
+                  onAnswerElicitationQuestion={answerTacitElicitationQuestion}
                 />
               </div>
             ) : (
@@ -2308,5 +2484,13 @@ export default function BiotechProjectWorkspace() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function BiotechProjectWorkspace() {
+  return (
+    <Suspense fallback={<main className="min-h-screen bg-slate-950 p-8 text-white">Loading workspace...</main>}>
+      <BiotechProjectWorkspaceContent />
+    </Suspense>
   );
 }

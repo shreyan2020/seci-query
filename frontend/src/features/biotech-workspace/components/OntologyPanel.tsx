@@ -14,8 +14,10 @@ interface OntologyPanelProps {
 const nodeTone: Record<string, string> = {
   project: 'border-slate-300 bg-slate-50 text-slate-800',
   paper: 'border-sky-200 bg-sky-50 text-sky-900',
+  claim: 'border-blue-200 bg-blue-50 text-blue-900',
   concept: 'border-emerald-200 bg-emerald-50 text-emerald-900',
   gap: 'border-rose-200 bg-rose-50 text-rose-900',
+  project_belief: 'border-teal-200 bg-teal-50 text-teal-900',
   validation: 'border-violet-200 bg-violet-50 text-violet-900',
   proposal: 'border-amber-200 bg-amber-50 text-amber-900',
   tacit_memory: 'border-orange-200 bg-orange-50 text-orange-900',

@@ -1,34 +1,27 @@
 import Link from 'next/link';
 
 import type { StatusState } from '@/features/biotech-workspace/types';
-import { classNames } from '@/features/biotech-workspace/lib/utils';
 
 interface WorkspaceHeaderProps {
   selectedProject: boolean;
   onReturnToLanding: () => void;
   onOpenMemory?: () => void;
+  onExportDiagnostics?: () => void;
+  exportingDiagnostics?: boolean;
   journeyHref?: string;
   memoryItemCount?: number;
   status: StatusState | null;
 }
 
-function compactStatus(status: StatusState | null) {
-  if (!status) return null;
-  const message = status.message || '';
-  if (/search_literature returned/i.test(message)) {
-    return { ...status, message: 'Literature library updated.' };
-  }
-  if (/Fetching literature with/i.test(message)) {
-    return { ...status, message: 'Searching literature...' };
-  }
-  if (/Fetched \d+ new literature/i.test(message)) {
-    return { ...status, message: 'Literature evidence refreshed.' };
-  }
-  return status;
-}
-
-export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemory, journeyHref, memoryItemCount = 0, status }: WorkspaceHeaderProps) {
-  const visibleStatus = compactStatus(status);
+export function WorkspaceHeader({
+  selectedProject,
+  onReturnToLanding,
+  onOpenMemory,
+  onExportDiagnostics,
+  exportingDiagnostics = false,
+  journeyHref,
+  memoryItemCount = 0,
+}: WorkspaceHeaderProps) {
   return (
     <section className="rounded-none border border-emerald-200/70 bg-white/90 p-6 shadow-[0_24px_70px_-45px_rgba(15,23,42,0.45)] backdrop-blur">
       <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
@@ -58,6 +51,15 @@ export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemo
                   User Journey
                 </Link>
               )}
+              {onExportDiagnostics && (
+                <button
+                  onClick={onExportDiagnostics}
+                  disabled={exportingDiagnostics}
+                  className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-950 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {exportingDiagnostics ? 'Exporting...' : 'Export Diagnostics'}
+                </button>
+              )}
               <button
                 onClick={onReturnToLanding}
                 className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-900 hover:bg-emerald-100"
@@ -66,33 +68,8 @@ export function WorkspaceHeader({ selectedProject, onReturnToLanding, onOpenMemo
               </button>
             </>
           )}
-          <Link
-            href="/personas"
-            className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
-          >
-            Persona Studio
-          </Link>
-          <Link
-            href="/reports"
-            className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
-          >
-            Reports
-          </Link>
         </div>
       </div>
-
-      {visibleStatus && (
-        <div
-          className={classNames(
-            'mt-5 rounded-2xl border px-4 py-3 text-sm',
-            visibleStatus.type === 'success' && 'border-emerald-200 bg-emerald-50 text-emerald-900',
-            visibleStatus.type === 'error' && 'border-rose-200 bg-rose-50 text-rose-900',
-            visibleStatus.type === 'info' && 'border-sky-200 bg-sky-50 text-sky-900'
-          )}
-        >
-          {visibleStatus.message}
-        </div>
-      )}
     </section>
   );
 }
