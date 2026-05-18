@@ -133,8 +133,9 @@ The backend uses `127.0.0.1:8000`. Close other local services using that port be
 
 The compose setup runs four services:
 
-- `frontend` on port `3000`
-- `backend` on port `8000`
+- `nginx` on port `80`, the public entrypoint
+- `frontend` on Docker's internal network
+- `backend` on Docker's internal network
 - `worker` for report rendering jobs
 - `ollama` on Docker's internal network only, so it will not conflict with a host Ollama on port `11434`
 
@@ -144,19 +145,17 @@ Create a deployment environment file from the example:
 cp .env.example .env
 ```
 
-For a simple server where users open `http://SERVER_HOST:3000`, set:
+For a simple server where users open `http://SERVER_HOST`, set:
 
 ```env
-FRONTEND_BIND=0.0.0.0
-FRONTEND_PORT=3000
-BACKEND_BIND=0.0.0.0
-BACKEND_PORT=8000
-NEXT_PUBLIC_API_URL=
-NEXT_PUBLIC_API_PORT=8000
-CORS_ORIGINS=http://SERVER_HOST:3000
+NGINX_BIND=0.0.0.0
+NGINX_PORT=80
+NEXT_PUBLIC_API_URL=/
+NEXT_PUBLIC_API_PORT=
+CORS_ORIGINS=http://SERVER_HOST
 ```
 
-Leaving `NEXT_PUBLIC_API_URL` blank makes the browser call `http://SERVER_HOST:8000` when the frontend is opened from `http://SERVER_HOST:3000`. If the API is behind a reverse proxy or a different domain, set `NEXT_PUBLIC_API_URL` to the full public API origin instead.
+Using `NEXT_PUBLIC_API_URL=/` makes browser API calls stay on the same origin through nginx. If the API is behind a different domain, set `NEXT_PUBLIC_API_URL` to the full public API origin instead.
 
 Build and start:
 
@@ -177,7 +176,7 @@ Pull the model inside the Ollama container before using AI-powered flows:
 docker compose exec ollama ollama pull qwen2.5:7b-instruct
 ```
 
-Open the frontend at `http://SERVER_HOST:3000`. The backend health check is available at `http://SERVER_HOST:8000/health`.
+Open the app at `http://SERVER_HOST`. The proxied backend health check is available at `http://SERVER_HOST/health`.
 
 ## Developer Setup
 
