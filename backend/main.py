@@ -2858,6 +2858,65 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
 
         original_pdf_path = Path(str(download["original_pdf_path"]))
         annotated_pdf_path = original_pdf_path.with_name("annotated.pdf")
+        annotation_json_path = annotated_pdf_path.with_name("annotations.json")
+        paper_id = str(download.get("paper_id") or annotated_pdf_path.parent.name)
+        if annotated_pdf_path.exists() and annotation_json_path.exists():
+            try:
+                cached_annotation = json.loads(annotation_json_path.read_text(encoding="utf-8"))
+                cached_query = str(cached_annotation.get("query") or "")
+                cached_objective_id = str(cached_annotation.get("objective_id") or "")
+                cached_objective_title = str(cached_annotation.get("objective_title") or "")
+                current_objective_id = str(request.objective_id or "")
+                current_objective_title = str(request.objective_title or "")
+                if (
+                    cached_query == request.query
+                    and cached_objective_id == current_objective_id
+                    and cached_objective_title == current_objective_title
+                ):
+                    annotations = [
+                        PaperAnnotation.model_validate(item)
+                        for item in (cached_annotation.get("annotations") or [])
+                        if isinstance(item, dict)
+                    ]
+                    structured_notes = cached_annotation.get("structured_notes") or {}
+                    if not isinstance(structured_notes, dict):
+                        structured_notes = {}
+                    passage_insights = [str(item) for item in (cached_annotation.get("passage_insights") or [])]
+                    await log_event_safe(
+                        "paper_pdf_annotated",
+                        {
+                            "project_id": project_id,
+                            "persona_id": request.persona_id,
+                            "paper_id": paper_id,
+                            "pmid": download.get("pmid"),
+                            "pmcid": download.get("pmcid"),
+                            "annotations": len(annotations),
+                            "structured_note_count": sum(len(value) for value in structured_notes.values() if isinstance(value, list)),
+                            "visual_annotations": True,
+                            "workflow_mode": request.workflow_mode,
+                            "cache_hit": True,
+                        },
+                    )
+                    return PreparePaperPdfResponse(
+                        status="success",
+                        message=f"Reused annotated PDF with {len(annotations)} highlighted passages and structured paper notes.",
+                        paper_id=paper_id,
+                        pmid=download.get("pmid") or ids.get("pmid") or None,
+                        pmcid=download.get("pmcid") or ids.get("pmcid") or None,
+                        source_pdf_url=download.get("source_pdf_url") or cached_annotation.get("source_pdf_url"),
+                        original_pdf_path=str(original_pdf_path.resolve()),
+                        annotated_pdf_path=str(annotated_pdf_path.resolve()),
+                        annotated_pdf_url=f"/api/projects/{project_id}/literature/pdf/{paper_id}/annotated",
+                        annotations=annotations,
+                        insights=[str(item) for item in (cached_annotation.get("insights") or [])],
+                        passage_insights=passage_insights,
+                        structured_notes=structured_notes,
+                        research_questions=[str(item) for item in (cached_annotation.get("research_questions") or [])],
+                        visual_annotations=True,
+                        workflow_trace=workflow_logger.trace if workflow_logger else [],
+                    )
+            except Exception:
+                pass
         parser_context = {}
         if request.workflow_mode == "sota":
             parser_stage = workflow_logger.start(
@@ -2953,7 +3012,6 @@ async def prepare_literature_pdf(project_id: int, request: PreparePaperPdfReques
                     "research_question_count": len(annotation_result.get("research_questions") or []),
                 },
             )
-        annotation_json_path = annotated_pdf_path.with_name("annotations.json")
         annotation_json_path.write_text(
             json.dumps(
                 {

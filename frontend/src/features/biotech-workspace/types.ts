@@ -255,6 +255,16 @@ export interface PaperAnnotation {
   reason: string;
   matched_terms: string[];
   score: number;
+  elicitation_prompts?: PaperPassageElicitationPrompt[];
+}
+
+export interface PaperPassageElicitationPrompt {
+  id: string;
+  category: 'transferability' | 'feasibility' | 'constraints' | 'evidence_trust' | 'validation' | 'handoff' | 'other';
+  question: string;
+  why_it_matters: string;
+  evidence_refs: string[];
+  priority: 'low' | 'medium' | 'high';
 }
 
 export interface PaperStructuredNotes {

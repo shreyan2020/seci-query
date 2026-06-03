@@ -2094,6 +2094,159 @@ Return JSON with these keys:
     return notes
 
 
+def _passage_prompt_id(annotation: Dict[str, Any], question: str) -> str:
+    seed = f"p{annotation.get('page')}_{question}"
+    slug = re.sub(r"[^a-z0-9]+", "_", seed.lower()).strip("_")[:72]
+    return f"passage_prompt_{slug}" if slug else "passage_prompt"
+
+
+def _normalize_passage_prompt_category(value: Any) -> str:
+    category = str(value or "").strip().lower()
+    return category if category in {
+        "transferability",
+        "feasibility",
+        "constraints",
+        "evidence_trust",
+        "validation",
+        "handoff",
+        "other",
+    } else "other"
+
+
+def _fallback_passage_elicitation_prompts(selected: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    prompts_by_id: Dict[str, List[Dict[str, Any]]] = {}
+    for index, annotation in enumerate(selected[:8]):
+        page = annotation.get("page")
+        matched_terms = ", ".join(str(term) for term in (annotation.get("matched_terms") or [])[:4])
+        question = (
+            f"Before using the highlighted passage on page {page}, what transferability or validation caveat should be recorded"
+            f"{f' for {matched_terms}' if matched_terms else ''}?"
+        )
+        prompts_by_id[f"ann_{index + 1}"] = [
+            {
+                "id": _passage_prompt_id(annotation, question),
+                "category": "transferability",
+                "question": question,
+                "why_it_matters": "The answer helps decide whether this passage should influence gap ranking, follow-up validation, or project planning.",
+                "evidence_refs": [
+                    _trim_to_word_boundary(str(annotation.get("snippet") or ""), max_chars=260)
+                ] if str(annotation.get("snippet") or "").strip() else [],
+                "priority": "medium",
+            }
+        ]
+    return prompts_by_id
+
+
+async def _llm_passage_elicitation_prompts(
+    *,
+    selected: List[Dict[str, Any]],
+    structured_notes: Dict[str, List[str]],
+    contexts: Dict[str, str],
+    strict: bool = False,
+) -> Dict[str, List[Dict[str, Any]]]:
+    fallback_prompts = _fallback_passage_elicitation_prompts(selected)
+    if os.getenv("ENABLE_PDF_PASSAGE_PROMPTS_LLM") != "1":
+        return fallback_prompts
+    if not selected or os.getenv("DISABLE_PDF_PASSAGE_PROMPTS_LLM") == "1":
+        if strict:
+            raise RuntimeError("LLM passage prompt generation requires selected annotations and DISABLE_PDF_PASSAGE_PROMPTS_LLM must not be set.")
+        return fallback_prompts
+    try:
+        from ollama_client import ollama
+    except Exception as exc:
+        if strict:
+            raise RuntimeError("Ollama client is required for strict passage prompt generation.") from exc
+        return fallback_prompts
+
+    compact_annotations = [
+        {
+            "annotation_id": f"ann_{index + 1}",
+            "page": item.get("page"),
+            "snippet": str(item.get("snippet") or "")[:900],
+            "reason": str(item.get("reason") or "")[:500],
+            "matched_terms": item.get("matched_terms") or [],
+        }
+        for index, item in enumerate(selected[:10])
+    ]
+    prompt = f"""
+You are turning highlighted passages from a scientific PDF into researcher-facing tacit knowledge prompts.
+
+Project goal: {contexts.get('project_goal') or 'not provided'}
+Investigation query: {contexts.get('query') or 'not provided'}
+End product: {contexts.get('end_product') or 'not provided'}
+Target host: {contexts.get('host') or 'not provided'}
+Selected objective: {contexts.get('objective_title') or contexts.get('objective') or 'not provided'}
+Collaborator lens: {contexts.get('persona_name') or contexts.get('persona') or 'not provided'}
+
+Structured paper notes:
+{json.dumps(structured_notes, indent=2)}
+
+Highlighted passages:
+{json.dumps(compact_annotations, indent=2)}
+
+For each useful highlighted passage, write at most one question that asks the researcher for tacit judgment needed before using that passage.
+The question must be grounded in the passage and should ask about transferability, feasibility, constraints, evidence trust, validation priority, or handoff risk.
+Do not ask generic summary questions. Do not invent claims beyond the snippet/reason/notes.
+
+Return JSON:
+{{
+  "prompts": [
+    {{
+      "annotation_id": "ann_1",
+      "category": "transferability|feasibility|constraints|evidence_trust|validation|handoff|other",
+      "question": "specific question tied to this highlighted passage",
+      "why_it_matters": "how the answer changes retrieval, interpretation, planning, validation, or proposal quality",
+      "evidence_refs": ["short quote or paraphrase from the highlighted passage/reason"],
+      "priority": "low|medium|high"
+    }}
+  ]
+}}
+""".strip()
+    try:
+        payload = await ollama.generate_json(prompt, max_retries=1, temperature=0.15, top_p=0.85)
+    except Exception as exc:
+        if strict:
+            raise RuntimeError(f"LLM passage prompt generation failed: {exc}") from exc
+        return fallback_prompts
+
+    raw_prompts = payload.get("prompts") if isinstance(payload, dict) else None
+    if not isinstance(raw_prompts, list):
+        if strict:
+            raise RuntimeError("LLM passage prompt generation returned invalid JSON shape.")
+        return fallback_prompts
+
+    by_annotation_id = {item["annotation_id"]: selected[index] for index, item in enumerate(compact_annotations)}
+    prompts_by_id: Dict[str, List[Dict[str, Any]]] = {}
+    for raw in raw_prompts:
+        if not isinstance(raw, dict):
+            continue
+        annotation_id = str(raw.get("annotation_id") or "").strip()
+        annotation = by_annotation_id.get(annotation_id)
+        question = re.sub(r"\s+", " ", str(raw.get("question") or "")).strip()
+        if not annotation or not question:
+            continue
+        priority = str(raw.get("priority") or "medium").strip().lower()
+        if priority not in {"low", "medium", "high"}:
+            priority = "medium"
+        prompts_by_id.setdefault(annotation_id, []).append(
+            {
+                "id": _passage_prompt_id(annotation, question),
+                "category": _normalize_passage_prompt_category(raw.get("category")),
+                "question": question[:500],
+                "why_it_matters": re.sub(r"\s+", " ", str(raw.get("why_it_matters") or "")).strip()[:700],
+                "evidence_refs": [
+                    re.sub(r"\s+", " ", str(item or "")).strip()[:260]
+                    for item in (raw.get("evidence_refs") or [])
+                    if str(item or "").strip()
+                ][:4],
+                "priority": priority,
+            }
+        )
+    if strict and not prompts_by_id:
+        raise RuntimeError("LLM passage prompt generation returned no usable prompts.")
+    return prompts_by_id or fallback_prompts
+
+
 async def annotate_pdf_for_objective(
     *,
     pdf_path: str | Path,
@@ -2228,6 +2381,14 @@ async def annotate_pdf_for_objective(
             selected=public_selected,
             research_questions=research_questions,
         )
+    passage_prompts = await _llm_passage_elicitation_prompts(
+        selected=public_selected,
+        structured_notes=structured_notes,
+        contexts=contexts,
+        strict=strict_llm_notes,
+    )
+    for index, item in enumerate(public_selected):
+        item["elicitation_prompts"] = passage_prompts.get(f"ann_{index + 1}", [])
     structured_insights = _structured_notes_to_insights(structured_notes, limit=10)
     combined_research_questions = _unique_in_order([*research_questions, *(structured_notes.get("research_gaps") or [])])[:12]
 

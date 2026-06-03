@@ -57,6 +57,8 @@ import type {
   JudgmentCall,
   ObjectiveCluster,
   OntologyPreviewResponse,
+  PaperAnnotation,
+  PaperPassageElicitationPrompt,
   PlanStep,
   ProjectExecutionEvent,
   ProjectExecutionRun,
@@ -1655,6 +1657,9 @@ function BiotechProjectWorkspaceContent() {
     setStatus({ type: 'success', message: 'Captured your literature judgment in the work template.' });
   };
 
+  const passagePromptAnswerKey = (paperTitle: string, annotation: PaperAnnotation, prompt: PaperPassageElicitationPrompt) =>
+    `${paperTitle} :: page ${annotation.page} :: ${prompt.id} :: ${prompt.question}`;
+
   const handleCapturePaperTacitAnswer = (question: string, paperTitle: string) => {
     const scopedQuestion = `${paperTitle} :: ${question}`;
     const answer = (literatureElicitationAnswers[scopedQuestion] || '').trim();
@@ -1682,6 +1687,45 @@ function BiotechProjectWorkspaceContent() {
       }),
     }));
     setStatus({ type: 'success', message: 'Captured the paper-specific judgment in the work template.' });
+  };
+
+  const handleCapturePassagePromptAnswer = (
+    annotation: PaperAnnotation,
+    prompt: PaperPassageElicitationPrompt,
+    paperTitle: string
+  ) => {
+    const scopedQuestion = passagePromptAnswerKey(paperTitle, annotation, prompt);
+    const answer = (literatureElicitationAnswers[scopedQuestion] || '').trim();
+    if (!answer) return;
+    const stableId = `passage_tacit_${prompt.id}`.replace(/[^a-z0-9_]+/gi, '_').toLowerCase().slice(0, 80);
+    const evidenceRef = annotation.snippet ? `Highlighted passage on page ${annotation.page}: ${annotation.snippet.slice(0, 260)}` : `Highlighted passage on page ${annotation.page}`;
+    const nextJudgment: JudgmentCall = {
+      id: stableId,
+      stance: answer,
+      rationale: [
+        `Passage-grounded response for "${paperTitle}": ${prompt.question}`,
+        prompt.why_it_matters ? `Why it matters: ${prompt.why_it_matters}` : '',
+        annotation.reason ? `System note: ${annotation.reason}` : '',
+        evidenceRef,
+      ].filter(Boolean).join('\n'),
+      implication: `Use this ${prompt.category.replace('_', ' ')} judgment when interpreting this highlighted passage, ranking gaps, and planning follow-up work.`,
+    };
+    setResearchWorkTemplate((current) => ({
+      ...current,
+      literature_findings: current.literature_findings.map((finding) => {
+        if (pdfViewer?.findingId && finding.id !== pdfViewer.findingId) {
+          return finding;
+        }
+        const judgments = finding.judgment_calls || [];
+        return {
+          ...finding,
+          judgment_calls: judgments.some((item) => item.id === stableId)
+            ? judgments.map((item) => (item.id === stableId ? nextJudgment : item))
+            : [...judgments, nextJudgment],
+        };
+      }),
+    }));
+    setStatus({ type: 'success', message: 'Captured the passage-grounded judgment in the work template.' });
   };
 
   const handleCompleteLiteratureReview = (summary: string) => {
@@ -2288,6 +2332,73 @@ function BiotechProjectWorkspaceContent() {
                           {question}
                         </div>
                       ))}
+                    </div>
+                  </div>
+                )}
+
+                {(pdfViewerFinding?.annotations || []).some((annotation) => (annotation.elicitation_prompts || []).length > 0) && (
+                  <div className="mt-5 border-t border-slate-200 pt-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-indigo-700">
+                      Passage-Grounded Prompts
+                    </div>
+                    <div className="mt-1 text-xs leading-5 text-slate-600">
+                      These prompts are tied to specific highlighted passages. Answers are saved as judgments for this source.
+                    </div>
+                    <div className="mt-3 space-y-3">
+                      {(pdfViewerFinding?.annotations || [])
+                        .filter((annotation) => (annotation.elicitation_prompts || []).length > 0)
+                        .map((annotation, annotationIndex) => (
+                          <div key={`${annotation.page}-${annotation.snippet.slice(0, 40)}-${annotationIndex}`} className="rounded-2xl border border-indigo-100 bg-indigo-50/70 p-3">
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-indigo-800">Page {annotation.page}</div>
+                            <div className="mt-1 line-clamp-4 text-xs leading-5 text-slate-700">{annotation.snippet}</div>
+                            {annotation.reason && (
+                              <div className="mt-2 rounded-xl bg-white/75 px-2 py-1.5 text-xs leading-5 text-slate-700">
+                                <span className="font-semibold text-slate-950">System note:</span> {annotation.reason}
+                              </div>
+                            )}
+                            <div className="mt-3 space-y-3">
+                              {(annotation.elicitation_prompts || []).map((prompt) => {
+                                const scopedQuestion = passagePromptAnswerKey(pdfViewer.title, annotation, prompt);
+                                const answer = literatureElicitationAnswers[scopedQuestion] || '';
+                                return (
+                                  <div key={prompt.id} className="rounded-xl border border-indigo-100 bg-white p-3">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-800">
+                                        {prompt.category.replace('_', ' ')}
+                                      </span>
+                                      <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                                        {prompt.priority}
+                                      </span>
+                                    </div>
+                                    <div className="mt-2 text-sm font-semibold leading-6 text-slate-950">{prompt.question}</div>
+                                    {prompt.why_it_matters && (
+                                      <div className="mt-1 text-xs leading-5 text-slate-600">{prompt.why_it_matters}</div>
+                                    )}
+                                    <textarea
+                                      value={answer}
+                                      onChange={(event) =>
+                                        setLiteratureElicitationAnswers((current) => ({
+                                          ...current,
+                                          [scopedQuestion]: event.target.value,
+                                        }))
+                                      }
+                                      rows={3}
+                                      className="mt-3 w-full rounded-xl border border-indigo-100 bg-white px-3 py-2 text-sm text-slate-900"
+                                      placeholder="Your tacit judgment about how this passage should be used..."
+                                    />
+                                    <button
+                                      onClick={() => handleCapturePassagePromptAnswer(annotation, prompt, pdfViewer.title)}
+                                      disabled={!answer.trim()}
+                                      className="mt-2 rounded-xl border border-indigo-200 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-950 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      Add as passage judgment
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
                     </div>
                   </div>
                 )}

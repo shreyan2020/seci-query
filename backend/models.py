@@ -932,12 +932,22 @@ class FetchProjectLiteratureResponse(BaseModel):
     workflow_trace: List[WorkflowStageTrace] = Field(default_factory=list)
 
 
+class PaperPassageElicitationPrompt(BaseModel):
+    id: str
+    category: Literal["transferability", "feasibility", "constraints", "evidence_trust", "validation", "handoff", "other"] = "other"
+    question: str
+    why_it_matters: str = ""
+    evidence_refs: List[str] = Field(default_factory=list)
+    priority: Literal["low", "medium", "high"] = "medium"
+
+
 class PaperAnnotation(BaseModel):
     page: int
     snippet: str
     reason: str
     matched_terms: List[str] = Field(default_factory=list)
     score: float = 0.0
+    elicitation_prompts: List[PaperPassageElicitationPrompt] = Field(default_factory=list)
 
 
 class PaperStructuredNotes(BaseModel):

@@ -25,6 +25,25 @@ import { API_BASE } from './api-base';
 
 export { API_BASE };
 
+function formatApiError(payload: unknown, fallback: string): string {
+  if (!payload || typeof payload !== 'object') return fallback;
+  const detail = (payload as { detail?: unknown }).detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (detail && typeof detail === 'object') {
+    const message = (detail as { message?: unknown }).message;
+    const trace = (detail as { workflow_trace?: Array<{ message?: string; errors?: string[] }> }).workflow_trace || [];
+    const traceError = trace
+      .flatMap((item) => item.errors || [])
+      .find((item) => item.trim());
+    if (typeof message === 'string' && message.trim()) {
+      return traceError ? `${message} (${traceError})` : message;
+    }
+    if (traceError) return traceError;
+  }
+  const message = (payload as { message?: unknown }).message;
+  return typeof message === 'string' && message.trim() ? message : fallback;
+}
+
 export async function fetchProjects(): Promise<ProjectsResponse> {
   const response = await fetch(`${API_BASE}/api/projects`, { cache: 'no-store' });
   if (!response.ok) throw new Error('Failed to load projects');
@@ -293,7 +312,7 @@ export async function preparePaperPdf(
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
-    throw new Error(err.detail || 'Failed to prepare annotated PDF');
+    throw new Error(formatApiError(err, 'Failed to prepare annotated PDF'));
   }
   return response.json();
 }
